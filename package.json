@@ -34,6 +34,18 @@
     "clean": "rimraf dist",
     "lint": "tsc --noEmit"
   },
+  "peerDependencies": {
+    "@onnxruntime/web": ">=1.14.0",
+    "@onnxruntime/node": ">=1.14.0"
+  },
+  "peerDependenciesMeta": {
+    "@onnxruntime/web": {
+      "optional": true
+    },
+    "@onnxruntime/node": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "rimraf": "^5.0.5",
     "tsup": "^8.0.0",
@@ -54,6 +66,8 @@
     "sourcemap": true,
     "target": "es2020",
     "outDir": "dist",
-    "treeshake": true
+    "treeshake": true,
+    "bundle": true,
+    "splitting": false
   }
 }

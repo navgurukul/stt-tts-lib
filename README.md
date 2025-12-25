@@ -2,14 +2,15 @@
 
 TypeScript utilities for speech-to-text (STT), voice activity detection (VAD), and text-to-speech (TTS) flows. Ships ESM/CJS bundles with declarations and simple samples to get you started.
 
-## Installation
+## Quick Start
+
+### Installation
 
 ```bash
 npm install stt-tts-lib
-# or if working locally
-npm install
-npm run build
 ```
+
+For Piper TTS (ONNX-based speech synthesis), see [SETUP_PIPER.md](./SETUP_PIPER.md) for complete setup instructions.
 
 ## Build & Scripts
 
@@ -88,13 +89,60 @@ stt.pushFinal("hello world");
 stt.stop();
 ```
 
-### TTS
+### TTS (Basic - Configuration Only)
 ```ts
 import { preparePiperVoice, streamTokensToSpeech, createOrtEnvironment } from "stt-tts-lib/tts";
 
 async function run() {
   const voice = preparePiperVoice({ voiceId: "en_US-lessac" });
   await createOrtEnvironment({ device: "cpu" });
+
+  const tokens = ["Hello", " ", "world", "!"];
+  await streamTokensToSpeech(tokens, {
+    chunkSize: 10,
+    delayMs: 50,
+    onChunk: async (text) => console.log("streaming chunk:", text),
+  });
+}
+```
+
+### TTS (Complete - Real Synthesis with ONNX)
+```ts
+import { createPiperSynthesizer, textToPhonemes, createAudioPlayer } from "stt-tts-lib/tts";
+
+async function synthesizeSpeech() {
+  // 1. Create and initialize synthesizer
+  const synthesizer = await createPiperSynthesizer({
+    modelPath: '/models/en_US-lessac-medium.onnx',
+    sampleRate: 22050
+  });
+
+  // 2. Create audio player
+  const player = createAudioPlayer({
+    sampleRate: 22050,
+    volume: 1.0
+  });
+
+  // 3. Convert text to phonemes
+  const phonemes = textToPhonemes("Hello world!");
+
+  // 4. Synthesize audio
+  const result = await synthesizer.synthesize(phonemes);
+  console.log(`Synthesized ${result.duration.toFixed(2)}s of audio`);
+
+  // 5. Play audio
+  await player.play(result.audio, result.sampleRate);
+
+  // 6. Cleanup
+  await synthesizer.dispose();
+  await player.close();
+}
+```
+
+**Note:** The complete synthesis requires:
+- `npm install @onnxruntime/web`
+- Downloading Piper ONNX models from [HuggingFace](https://huggingface.co/rhasspy/piper-voices)
+- See [SETUP_PIPER.md](./SETUP_PIPER.md) for detailed setup instructions
 
   const tokens = ["Hello", " world", "! Streaming TTS is easy."];
   await streamTokensToSpeech(tokens, {
@@ -123,10 +171,10 @@ await tts.addChunk("More text will be buffered and spoken.");
 await tts.finishStreaming();
 ```
 
-## Samples
+## Documentation
 
-- STT flow: `sample/stt-demo.ts`
-- TTS flow: `sample/tts-demo.ts`
+- **[SETUP_PIPER.md](./SETUP_PIPER.md)** - Complete Piper TTS setup, architecture, integration guide, and troubleshooting
+- **Samples**: See `sample/` directory for working examples
 
 ## Troubleshooting
 
@@ -134,3 +182,5 @@ await tts.finishStreaming();
 - **Different ORT provider**: pass `providers` or `device: "webgpu"` to `createOrtEnvironment`.
 - **Long-running STT**: lower `maxUtteranceMs` or `maxSilenceMs` in `ResetSTTLogic`.
 - **Tree-shaking**: the library is side-effect-free; import only what you need.
+
+For Piper TTS issues, see troubleshooting section in [SETUP_PIPER.md](./SETUP_PIPER.md).
