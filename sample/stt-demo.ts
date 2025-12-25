@@ -1,4 +1,4 @@
-import { ResetSTTLogic, STTLogic, VADController } from "../src/stt/index.js";
+import { ResetSTTLogic, STTLogic, VADController } from "../dist/stt/index.js";
 
 const vad = new VADController({
   activation: -35,
