@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>STT Demo</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2rem; }
+    button { margin-right: 0.5rem; padding: 0.6rem 1rem; }
+    #log { margin-top: 1rem; padding: 1rem; border: 1px solid #ddd; min-height: 150px; white-space: pre-wrap; }
+    #transcript { margin-top: 1rem; padding: 1rem; border: 1px solid #ddd; min-height: 80px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>STT Demo</h1>
+  <p>Runs in the browser using the Web Speech API. Use Chrome, allow microphone access, and serve over HTTPS or localhost.</p>
+  <div>
+    <button id="startBtn">Start Listening</button>
+    <button id="stopBtn">Stop Listening</button>
+  </div>
+  <div id="transcript" aria-live="polite"></div>
+  <div id="log"></div>
+
+  <script type="module">
+    // Assumes you built the library: npm install && npm run build
+    import { STTLogic } from '/dist/stt/index.js';
+
+    const logEl = document.getElementById('log');
+    const transcriptEl = document.getElementById('transcript');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+
+    const log = (msg) => {
+      const ts = new Date().toISOString();
+      logEl.textContent += `[${ts}] ${msg}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+    };
+
+    let stt;
+    try {
+      stt = new STTLogic(
+        (message, type = 'info') => log(`[${type}] ${message}`),
+        (text) => {
+          transcriptEl.textContent = text;
+        },
+        { sessionDurationMs: 30000, interimSaveIntervalMs: 1000 }
+      );
+    } catch (err) {
+      log(`Failed to init STT: ${err}`);
+    }
+
+    startBtn.addEventListener('click', () => {
+      try {
+        stt?.start();
+        log('Listening started');
+      } catch (err) {
+        log(`Start error: ${err}`);
+      }
+    });
+
+    stopBtn.addEventListener('click', () => {
+      try {
+        stt?.stop();
+        log('Listening stopped');
+      } catch (err) {
+        log(`Stop error: ${err}`);
+      }
+    });
+  </script>
+</body>
+</html>

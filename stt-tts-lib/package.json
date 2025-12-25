@@ -1,0 +1,59 @@
+{
+  "name": "stt-tts-lib",
+  "version": "0.1.0",
+  "description": "Speech-to-Text, VAD, and Text-to-Speech utilities for TypeScript projects.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    },
+    "./stt": {
+      "import": "./dist/stt/index.mjs",
+      "require": "./dist/stt/index.cjs",
+      "types": "./dist/stt/index.d.ts"
+    },
+    "./tts": {
+      "import": "./dist/tts/index.mjs",
+      "require": "./dist/tts/index.cjs",
+      "types": "./dist/tts/index.d.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "sample"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "clean": "rimraf dist",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.5",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0"
+  },
+  "tsup": {
+    "entry": {
+      "index": "src/index.ts",
+      "stt/index": "src/stt/index.ts",
+      "tts/index": "src/tts/index.ts"
+    },
+    "format": [
+      "esm",
+      "cjs"
+    ],
+    "dts": true,
+    "clean": true,
+    "sourcemap": true,
+    "target": "es2020",
+    "outDir": "dist",
+    "treeshake": true
+  }
+}
