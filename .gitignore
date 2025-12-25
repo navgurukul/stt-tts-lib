@@ -1,7 +1,10 @@
 /.venv
 */node_modules/
+*/models/
+public/*
 node_modules/
 */dist/
 dist/
 *.rtf
+*.tmp
 copilot-instructions.md

@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Piper TTS Complete Demo</title>
+  <!-- Load ONNX Runtime from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.all.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0;
+      padding: 2rem;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+    }
+    .container { max-width: 800px; margin: 0 auto; }
+    h1 { color: white; margin-bottom: 0.5rem; }
+    .subtitle { color: rgba(255,255,255,0.9); margin-bottom: 2rem; }
+    .card {
+      background: white;
+      border-radius: 12px;
+      padding: 2rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+    }
+    .card h2 { margin-top: 0; color: #333; }
+    textarea, input {
+      width: 100%;
+      padding: 12px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      font-family: monospace;
+      font-size: 14px;
+      margin: 0.5rem 0;
+    }
+    textarea { 
+      resize: vertical;
+      min-height: 100px;
+    }
+    .button-group {
+      display: flex;
+      gap: 10px;
+      margin: 1.5rem 0;
+      flex-wrap: wrap;
+    }
+    button {
+      flex: 1;
+      min-width: 120px;
+      padding: 12px 20px;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+    }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(102,126,234,0.4); }
+    .btn-secondary {
+      background: #f0f0f0;
+      color: #333;
+      border: 1px solid #ddd;
+    }
+    .btn-secondary:hover { background: #e8e8e8; }
+    .btn-danger {
+      background: #ff6b6b;
+      color: white;
+    }
+    .btn-danger:hover { background: #ff5252; }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .status {
+      padding: 12px;
+      border-radius: 8px;
+      margin-bottom: 1rem;
+      display: none;
+    }
+    .status.show { display: block; }
+    .status.info { background: #e3f2fd; color: #1976d2; border-left: 4px solid #1976d2; }
+    .status.success { background: #e8f5e9; color: #388e3c; border-left: 4px solid #388e3c; }
+    .status.error { background: #ffebee; color: #d32f2f; border-left: 4px solid #d32f2f; }
+    .status.warning { background: #fff3e0; color: #f57c00; border-left: 4px solid #f57c00; }
+    .log {
+      background: #f5f5f5;
+      padding: 12px;
+      border-radius: 8px;
+      max-height: 300px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .log-entry { padding: 2px 0; }
+    .log-entry.info { color: #1976d2; }
+    .log-entry.success { color: #388e3c; }
+    .log-entry.error { color: #d32f2f; }
+    .setup-note {
+      background: #fff3e0;
+      border-left: 4px solid #f57c00;
+      padding: 1rem;
+      margin: 1rem 0;
+      border-radius: 4px;
+    }
+    .setup-note h3 { margin: 0 0 0.5rem 0; color: #f57c00; }
+    .setup-note code { background: #ffebee; padding: 2px 6px; border-radius: 3px; }
+    .tabs {
+      display: flex;
+      gap: 5px;
+      margin-bottom: 1rem;
+      border-bottom: 2px solid #ddd;
+    }
+    .tab-btn {
+      padding: 10px 20px;
+      border: none;
+      background: none;
+      cursor: pointer;
+      font-weight: 600;
+      color: #999;
+      border-bottom: 3px solid transparent;
+      transition: all 0.3s ease;
+    }
+    .tab-btn.active {
+      color: #667eea;
+      border-bottom-color: #667eea;
+    }
+    .tab-content {
+      display: none;
+    }
+    .tab-content.active {
+      display: block;
+    }
+    label {
+      display: block;
+      font-weight: 600;
+      margin: 1rem 0 0.5rem 0;
+      color: #333;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎵 Piper TTS Complete Demo</h1>
+    <p class="subtitle">Real speech synthesis with ONNX Runtime & Web Audio API</p>
+
+    <!-- Tabs -->
+    <div class="card">
+      <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('demo', this)">Demo</button>
+        <button class="tab-btn" onclick="switchTab('test', this)">Library Test</button>
+        <button class="tab-btn" onclick="switchTab('setup', this)">Setup</button>
+      </div>
+
+      <!-- TAB 1: Main Demo -->
+      <div id="demo" class="tab-content active">
+        <h2>🎤 Synthesize & Play Speech</h2>
+        
+        <label>Model Path (local or CDN):</label>
+        <input type="text" id="modelPath" value="/models/en_US-lessac-medium.onnx" 
+               placeholder="e.g., /models/en_US-lessac-medium.onnx">
+        
+        <div class="button-group">
+          <button class="btn-secondary" onclick="initializeSynthesizer()">🔧 Initialize Synthesizer</button>
+        </div>
+
+        <label>Text to speak:</label>
+        <textarea id="textInput" placeholder="Enter text to synthesize...">Hello world! This is Piper text to speech with real ONNX synthesis.</textarea>
+        
+        <div class="button-group">
+          <button class="btn-primary" onclick="synthesizeAndPlay()" id="speakBtn" disabled>🎵 Synthesize & Play</button>
+          <button class="btn-danger" onclick="stopAudio()">⏹️ Stop</button>
+        </div>
+      </div>
+
+      <!-- TAB 2: Library Functions Test -->
+      <div id="test" class="tab-content">
+        <h2>📚 Library Functions Test</h2>
+        <p>Tests streaming TTS library functions with demo tone playback</p>
+        
+        <label>Text for streaming test:</label>
+        <textarea id="textInputLibrary" placeholder="Enter text...">Hello there! This is a streaming TTS test with the library functions.</textarea>
+        
+        <div class="button-group">
+          <button class="btn-primary" onclick="playWithLibraryFunctions()">🎵 Test Library Functions</button>
+          <button class="btn-danger" onclick="stopAllAudio()">⏹️ Stop Audio</button>
+        </div>
+      </div>
+
+      <!-- TAB 3: Setup Instructions -->
+      <div id="setup" class="tab-content">
+        <h2>📋 Setup Instructions</h2>
+        <div class="setup-note">
+          <h3>Before using the demo:</h3>
+          <ol>
+            <li>Install ONNX Runtime: <code>npm install @onnxruntime/web</code></li>
+            <li>Rebuild project: <code>npm run build</code></li>
+            <li>Download a Piper model from <a href="https://huggingface.co/rhasspy/piper-voices" target="_blank">HuggingFace</a></li>
+            <li>Place the <code>.onnx</code> file in <code>/models/</code> folder (create if needed)</li>
+            <li>Update the model path in the Demo tab</li>
+            <li>Click "Initialize Synthesizer" button</li>
+            <li>Enter text and click "Synthesize & Play"</li>
+          </ol>
+        </div>
+
+        <div class="setup-note">
+          <h3>Popular Models:</h3>
+          <ul style="margin: 0.5rem 0;">
+            <li><code>en_US-lessac-medium</code> - Good quality (22MB)</li>
+            <li><code>en_US-lessac-low</code> - Lower quality (2.2MB)</li>
+            <li><code>en_US-lessac-high</code> - High quality (80MB)</li>
+            <li><code>en_GB-alan-medium</code> - British English (22MB)</li>
+          </ul>
+        </div>
+
+        <div class="setup-note">
+          <h3>Troubleshooting:</h3>
+          <ul style="margin: 0.5rem 0;">
+            <li>Check browser console for errors (F12)</li>
+            <li>Ensure model file exists and path is correct</li>
+            <li>Clear browser cache if cache issues occur</li>
+            <li>Use developer tools to inspect network requests</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- Status & Logs -->
+    <div class="card">
+      <h2>📊 Status & Logs</h2>
+      <div id="status" class="status"></div>
+      <div class="log" id="log"></div>
+      <div class="button-group">
+        <button class="btn-secondary" onclick="clearLog()">Clear Log</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { 
+      createPiperSynthesizer, 
+      textToPhonemes,
+      createAudioPlayer,
+      preparePiperVoice,
+      createOrtEnvironment,
+      useStreamingTTS,
+    } from '../dist/tts/index.js';
+
+    // Global state
+    let synthesizer = null;
+    let player = null;
+    let audioContext = null;
+
+    // ========================================================================
+    // UI & TABS
+    // ========================================================================
+
+    window.switchTab = function(tab, button) {
+      // Hide all tabs
+      document.querySelectorAll('.tab-content').forEach(el => {
+        el.classList.remove('active');
+      });
+      document.querySelectorAll('.tab-btn').forEach(el => {
+        el.classList.remove('active');
+      });
+      
+      // Show selected tab
+      document.getElementById(tab).classList.add('active');
+      button.classList.add('active');
+    };
+
+    // ========================================================================
+    // LOGGING & STATUS
+    // ========================================================================
+    
+    function log(message, type = 'info') {
+      const timestamp = new Date().toLocaleTimeString();
+      const logEl = document.getElementById('log');
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${type}`;
+      entry.textContent = `[${timestamp}] ${message}`;
+      logEl.appendChild(entry);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function showStatus(message, type = 'info') {
+      const statusEl = document.getElementById('status');
+      statusEl.textContent = message;
+      statusEl.className = `status show ${type}`;
+    }
+
+    window.clearLog = function() {
+      document.getElementById('log').innerHTML = '';
+    };
+
+    // ========================================================================
+    // TAB 1: PIPER TTS SYNTHESIS
+    // ========================================================================
+
+    window.initializeSynthesizer = async function() {
+      const modelPath = document.getElementById('modelPath').value.trim();
+      
+      if (!modelPath) {
+        showStatus('⚠️ Please enter a model path', 'error');
+        return;
+      }
+
+      log('🔄 Initializing Piper synthesizer...');
+      showStatus('Initializing synthesizer...', 'info');
+
+      try {
+        log('📍 Step 1: Initializing ONNX Runtime environment...');
+        await createOrtEnvironment({ device: 'cpu' });
+        log('✓ ONNX Runtime initialized', 'success');
+
+        log('📍 Step 2: Creating Piper synthesizer...');
+        synthesizer = await createPiperSynthesizer({
+          modelPath: modelPath,
+          sampleRate: 22050
+        });
+        log('✓ Piper synthesizer created', 'success');
+        
+        log('📍 Step 3: Creating audio player...');
+        player = createAudioPlayer({
+          sampleRate: 22050,
+          volume: 1.0
+        });
+        log('✓ Audio player created', 'success');
+
+        log('✓ Synthesizer initialized successfully', 'success');
+        log(`✓ Model: ${modelPath}`, 'info');
+        showStatus('✅ Synthesizer ready! You can now synthesize speech.', 'success');
+        
+        document.getElementById('speakBtn').disabled = false;
+
+      } catch (error) {
+        console.error('Full error:', error);
+        log(`✗ Initialization failed: ${error.message}`, 'error');
+        log(`Stack: ${error.stack}`, 'error');
+        showStatus(`Error: ${error.message}`, 'error');
+        
+        if (error.message.includes('Failed to fetch') || error.message.includes('404')) {
+          log('💡 Make sure:', 'info');
+          log('  1. ONNX model file exists at the specified path', 'info');
+          log('  2. Server is serving the /models/ directory', 'info');
+          log('  3. Model path is correct', 'info');
+        } else if (error.message.includes('onnxruntime') || error.message.includes('undefined')) {
+          log('💡 ONNX Runtime issue - checking setup...', 'info');
+          log('  1. Verify import map in HTML head', 'info');
+          log('  2. Check CDN is accessible: https://cdn.jsdelivr.net/', 'info');
+          log('  3. Check browser console for network errors', 'info');
+        }
+      }
+    };
+
+    window.synthesizeAndPlay = async function() {
+      if (!synthesizer || !player) {
+        showStatus('⚠️ Please initialize the synthesizer first', 'warning');
+        return;
+      }
+
+      const text = document.getElementById('textInput').value.trim();
+      
+      if (!text) {
+        showStatus('⚠️ Please enter text to synthesize', 'error');
+        return;
+      }
+
+      log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      log('🎵 Starting synthesis...');
+      showStatus('Synthesizing speech...', 'info');
+
+      try {
+        log('📍 Step 1: Converting text to phonemes...');
+        log(`   Text: "${text}"`, 'info');
+        
+        const phonemes = textToPhonemes(text);
+        log(`✓ Generated ${phonemes.length} phonemes`, 'success');
+
+        log('📍 Step 2: Synthesizing audio with ONNX...');
+        const startTime = performance.now();
+        
+        const result = await synthesizer.synthesize(phonemes);
+        
+        const synthTime = performance.now() - startTime;
+        log(`✓ Synthesis complete in ${synthTime.toFixed(0)}ms`, 'success');
+        log(`   Duration: ${result.duration.toFixed(2)}s`, 'info');
+        log(`   Sample rate: ${result.sampleRate} Hz`, 'info');
+
+        log('📍 Step 3: Playing audio...');
+        showStatus('🔊 Playing audio...', 'info');
+        
+        await player.play(result.audio, result.sampleRate);
+        
+        log('✓ Playback complete', 'success');
+        log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        showStatus(`✅ Successfully synthesized and played ${result.duration.toFixed(2)}s of speech`, 'success');
+
+      } catch (error) {
+        log(`✗ ERROR: ${error.message}`, 'error');
+        showStatus(`Error: ${error.message}`, 'error');
+      }
+    };
+
+    window.stopAudio = function() {
+      if (player) {
+        player.stop();
+        log('⏹️ Playback stopped', 'info');
+        showStatus('Playback stopped', 'info');
+      }
+    };
+
+    // ========================================================================
+    // TAB 2: LIBRARY FUNCTIONS TEST
+    // ========================================================================
+
+    function getAudioContext() {
+      if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        log('✓ Web Audio API AudioContext created');
+      }
+      return audioContext;
+    }
+
+    function playDemoTone() {
+      try {
+        const ctx = getAudioContext();
+        
+        if (ctx.state === 'suspended') {
+          log('⏳ Resuming audio context...');
+          ctx.resume().then(() => {
+            log('✓ Audio context resumed');
+            playToneNow(ctx);
+          });
+        } else {
+          playToneNow(ctx);
+        }
+      } catch (err) {
+        log(`✗ Audio error: ${err.message}`, 'error');
+      }
+    }
+
+    function playToneNow(ctx) {
+      try {
+        const now = ctx.currentTime;
+        const duration = 2;
+        
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(440, now);
+        osc.frequency.exponentialRampToValueAtTime(200, now + duration);
+        
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + duration);
+        
+        osc.start(now);
+        osc.stop(now + duration);
+        
+        log(`🔊 Playing demo tone for ${duration}s`);
+        showStatus('🔊 Playing demo audio...', 'info');
+      } catch (err) {
+        log(`✗ Tone error: ${err.message}`, 'error');
+      }
+    }
+
+    window.playWithLibraryFunctions = async function() {
+      const text = document.getElementById('textInputLibrary').value || 'Hello world!';
+      
+      if (!text.trim()) {
+        showStatus('⚠️ Please enter text', 'error');
+        return;
+      }
+
+      log('📚 Testing Library Functions');
+      log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      showStatus('Testing library functions...', 'info');
+
+      try {
+        log('📍 Step 1: Preparing Piper voice configuration...');
+        const voiceConfig = preparePiperVoice({
+          voiceId: 'en_US-lessac-medium',
+          sampleRate: 22050,
+        });
+        log('✓ Voice config prepared');
+        log(`  Voice: ${voiceConfig.voiceId}`, 'success');
+
+        log('📍 Step 2: Initializing ONNX Runtime...');
+        const ortEnv = await createOrtEnvironment({ device: 'cpu' });
+        log('✓ ORT initialized');
+        log(`  Device: ${ortEnv.device}`, 'success');
+
+        log('📍 Step 3: Creating TTS streaming controller...');
+        const ttsController = useStreamingTTS({
+          voice: voiceConfig,
+          chunkSize: 48,
+          delayMs: 20,
+        });
+        log('✓ TTS controller created');
+
+        log('📍 Step 4: Streaming text chunks...');
+        const words = text.split(' ').filter(w => w.length > 0);
+        log(`Streaming ${words.length} words...`);
+        
+        for (const word of words) {
+          await ttsController.addChunk(word + ' ');
+        }
+        log(`✓ All ${words.length} words added`, 'success');
+
+        log('📍 Step 5: Finalizing stream...');
+        await ttsController.finishStreaming();
+        log('✓ Stream finalized', 'success');
+
+        log('📍 Step 6: Playing demo audio...');
+        playDemoTone();
+
+        log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        log('✅ Library function test complete!', 'success');
+        showStatus('✅ Library functions tested successfully (demo tone played)', 'success');
+
+      } catch (err) {
+        log(`✗ ERROR: ${err.message}`, 'error');
+        showStatus(`Error: ${err.message}`, 'error');
+      }
+    };
+
+    window.stopAllAudio = function() {
+      if (player) {
+        player.stop();
+        log('⏹️ Playback stopped', 'info');
+      }
+      if (audioContext && audioContext.state === 'running') {
+        audioContext.suspend();
+        log('⏹️ Audio context suspended', 'info');
+        setTimeout(() => audioContext?.resume(), 500);
+      }
+      showStatus('Audio stopped', 'info');
+    };
+
+    // ========================================================================
+    // INITIALIZATION
+    // ========================================================================
+
+    window.addEventListener('load', () => {
+      log('✓ Piper TTS Complete Demo loaded');
+      log('');
+      log('📚 Features:');
+      log('  • Real ONNX synthesis (Demo tab)');
+      log('  • Library function testing (Test tab)');
+      log('  • Setup instructions (Setup tab)');
+      log('');
+      showStatus('Ready. Select a tab to start.', 'info');
+    });
+  </script>
+</body>
+</html>

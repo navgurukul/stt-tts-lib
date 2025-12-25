@@ -42,8 +42,13 @@ export class PiperSynthesizer {
     if (this.ready) return;
 
     try {
-      // Dynamically import ONNX Runtime
-      const ort = await import('onnxruntime-web' as any);
+      // Get ONNX Runtime (try global first, then dynamic import)
+      let ort: any;
+      if (typeof window !== 'undefined' && (window as any).ort) {
+        ort = (window as any).ort;
+      } else {
+        ort = await import('onnxruntime-web' as any);
+      }
       
       // Load the ONNX model
       this.session = await ort.InferenceSession.create(this.config.modelPath, {
@@ -76,8 +81,15 @@ export class PiperSynthesizer {
     }
 
     try {
+      // Get ONNX Runtime (try global first, then dynamic import)
+      let ort: any;
+      if (typeof window !== 'undefined' && (window as any).ort) {
+        ort = (window as any).ort;
+      } else {
+        ort = await import('onnxruntime-web' as any);
+      }
+
       // Dynamically import ONNX Runtime for Tensor creation
-      const ort = await import('onnxruntime-web' as any);
 
       // Prepare input tensor
       const inputTensor = new ort.Tensor('int64', BigInt64Array.from(phonemeIds.map(id => BigInt(id))), [1, phonemeIds.length]);
