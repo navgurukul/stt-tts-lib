@@ -50,6 +50,21 @@ export class PiperSynthesizer {
         ort = await import('onnxruntime-web' as any);
       }
       
+      console.log('📍 Loading model from:', this.config.modelPath);
+      
+      // Verify the model can be fetched
+      try {
+        const response = await fetch(this.config.modelPath);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        const contentType = response.headers.get('content-type');
+        console.log('✓ Model fetch OK - Content-Type:', contentType);
+      } catch (fetchErr) {
+        console.error('✗ Model fetch failed:', fetchErr);
+        throw new Error(`Cannot fetch model: ${fetchErr}`);
+      }
+      
       // Load the ONNX model
       this.session = await ort.InferenceSession.create(this.config.modelPath, {
         executionProviders: ['wasm'],

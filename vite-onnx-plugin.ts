@@ -1,15 +1,8 @@
 /**
- * Vite Configuration for ONNX Runtime
- * Plugin to serve ONNX WASM files from node_modules
- * 
- * Usage in vite.config.ts:
- * 
- * import { defineConfig } from 'vite';
- * import { onnxWasmPlugin } from './src/lib/vite-onnx-plugin';
- * 
- * export default defineConfig({
- *   plugins: [onnxWasmPlugin()],
- * });
+ * Vite plugin to serve ONNX assets:
+ * - Serve `.onnx` models from `public/models` with `application/octet-stream`
+ * - Serve ONNX Runtime Web files under `/ort/*` from `node_modules/onnxruntime-web/dist`
+ * Ensures this runs before SPA fallback via pre-middleware.
  */
 
 import { Plugin } from 'vite';
@@ -19,44 +12,59 @@ import * as path from 'path';
 export function onnxWasmPlugin(): Plugin {
   return {
     name: 'onnx-wasm-files',
-    configureServer(server) {
-      server.middlewares.use((req, res, next) => {
-        // Serve ONNX WASM files from /ort/ path
-        if (req.url?.startsWith('/ort/')) {
-          const fileName = path.basename(req.url);
-          const wasmPath = path.join(
-            process.cwd(),
-            'node_modules',
-            'onnxruntime-web',
-            'dist',
-            fileName
-          );
+    apply: 'serve',
 
-          if (fs.existsSync(wasmPath)) {
-            res.setHeader('Content-Type', 'application/wasm');
-            res.setHeader('Cache-Control', 'public, max-age=31536000');
-            fs.createReadStream(wasmPath).pipe(res);
-            return;
+    configureServer(server) {
+      return () => {
+        server.middlewares.use((req, res, next) => {
+          const pathname = (() => {
+            try {
+              return new URL(req.url || '', 'http://localhost').pathname;
+            } catch {
+              return req.url?.split('?')[0] || '';
+            }
+          })();
+
+          // Serve .onnx model files from public/models
+          if (pathname.endsWith('.onnx')) {
+            const rel = pathname.startsWith('/') ? pathname.slice(1) : pathname;
+            const modelPath = path.join(process.cwd(), 'public', rel);
+
+            if (fs.existsSync(modelPath)) {
+              res.setHeader('Content-Type', 'application/octet-stream');
+              res.setHeader('Cache-Control', 'public, max-age=31536000');
+              fs.createReadStream(modelPath).pipe(res);
+              return;
+            } else {
+              res.statusCode = 404;
+              res.end(`Model file not found: ${modelPath}`);
+              return;
+            }
           }
-        }
-        next();
-      });
-    },
-    // For build: copy WASM files to output
-    generateBundle() {
-      const wasmDir = path.join(
-        process.cwd(),
-        'node_modules',
-        'onnxruntime-web',
-        'dist'
-      );
-      
-      if (fs.existsSync(wasmDir)) {
-        const files = fs.readdirSync(wasmDir);
-        const wasmFiles = files.filter(f => f.endsWith('.wasm') || f.endsWith('.wasm.map'));
-        
-        console.log(`📦 Copying ${wasmFiles.length} ONNX WASM files for production build`);
-      }
+
+          // Serve ONNX Runtime assets from /ort/
+          if (pathname.startsWith('/ort/')) {
+            const fileName = path.posix.basename(pathname);
+            const distDir = path.join(process.cwd(), 'node_modules', 'onnxruntime-web', 'dist');
+            const ortPath = path.join(distDir, fileName);
+
+            if (fs.existsSync(ortPath)) {
+              const contentType =
+                fileName.endsWith('.wasm') ? 'application/wasm' :
+                fileName.endsWith('.mjs') ? 'text/javascript' :
+                fileName.endsWith('.js') ? 'text/javascript' :
+                fileName.endsWith('.json') ? 'application/json' :
+                'application/octet-stream';
+              res.setHeader('Content-Type', contentType);
+              res.setHeader('Cache-Control', 'public, max-age=31536000');
+              fs.createReadStream(ortPath).pipe(res);
+              return;
+            }
+          }
+
+          next();
+        });
+      };
     },
   };
 }
