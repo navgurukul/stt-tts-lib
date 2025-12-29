@@ -8,3 +8,4 @@ dist/
 *.rtf
 *.tmp
 copilot-instructions.md
+*.tgz

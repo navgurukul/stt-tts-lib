@@ -1,63 +1,81 @@
 /**
- * Piper TTS Synthesizer using ONNX Runtime
- * Converts text to speech using Piper ONNX models
+ * Piper TTS Synthesizer using @realtimex/piper-tts-web
+ * This library handles text-to-phoneme conversion properly using espeak-ng
+ *
+ * Note: @realtimex/piper-tts-web handles ONNX Runtime configuration internally,
+ * so NO separate ort-setup.js is needed!
  */
 
-// Type definitions for ONNX Runtime (optional dependency)
-type InferenceSession = any;
-type Tensor = any;
+import * as piperTts from "@realtimex/piper-tts-web";
 
 export interface PiperSynthesizerConfig {
-  modelPath: string;
-  configPath?: string;
+  /** Voice ID (e.g., "en_US-hfc_female-medium") */
+  voiceId?: string;
+  /** Sample rate (default: 22050) */
   sampleRate?: number;
 }
 
 export interface SynthesisResult {
+  /** Audio data as WAV Blob */
+  audioBlob: Blob;
+  /** Audio data as Float32Array (for direct playback) */
   audio: Float32Array;
+  /** Sample rate */
   sampleRate: number;
+  /** Duration in seconds */
   duration: number;
 }
 
+const DEFAULT_VOICE_ID = "en_US-hfc_female-medium";
+
 /**
  * Piper TTS Synthesizer
- * Loads ONNX model and synthesizes speech from phonemes
+ * Uses @mintplex-labs/piper-tts-web for proper text-to-speech conversion
  */
-export class PiperSynthesizer {
-  private session: InferenceSession | null = null;
+export class TTSLogic {
   private config: PiperSynthesizerConfig;
   private ready = false;
+  private voiceLoaded = false;
 
-  constructor(config: PiperSynthesizerConfig) {
+  constructor(config: PiperSynthesizerConfig = {}) {
     this.config = {
+      voiceId: DEFAULT_VOICE_ID,
       sampleRate: 22050,
       ...config,
     };
   }
 
   /**
-   * Initialize the synthesizer by loading the ONNX model
+   * Initialize the synthesizer by loading the voice model
    */
   async initialize(): Promise<void> {
     if (this.ready) return;
 
     try {
-      // Get ONNX Runtime (try global first, then dynamic import)
-      let ort: any;
-      if (typeof window !== 'undefined' && (window as any).ort) {
-        ort = (window as any).ort;
-      } else {
-        ort = await import('onnxruntime-web' as any);
-      }
-      
-      // Load the ONNX model
-      this.session = await ort.InferenceSession.create(this.config.modelPath, {
-        executionProviders: ['wasm'],
-        graphOptimizationLevel: 'all',
-      });
+      const voiceId = this.config.voiceId!;
+      console.log("📍 Loading Piper voice:", voiceId);
 
+      // Check if voice is already cached
+      const storedVoices = await piperTts.stored();
+      const alreadyCached = Array.isArray(storedVoices)
+        ? storedVoices.includes(voiceId)
+        : false;
+
+      if (!alreadyCached) {
+        console.log("⬇️ Downloading voice model...");
+        await piperTts.download(voiceId, (progress) => {
+          if (progress?.total) {
+            const pct = Math.round((progress.loaded * 100) / progress.total);
+            console.log(`⬇️ Downloading: ${pct}%`);
+          }
+        });
+      } else {
+        console.log("✓ Voice found in cache");
+      }
+
+      this.voiceLoaded = true;
       this.ready = true;
-      console.log('✓ Piper synthesizer initialized');
+      console.log("✓ Piper synthesizer initialized");
     } catch (error) {
       throw new Error(`Failed to initialize Piper synthesizer: ${error}`);
     }
@@ -71,40 +89,41 @@ export class PiperSynthesizer {
   }
 
   /**
-   * Synthesize speech from phoneme IDs
-   * @param phonemeIds - Array of phoneme IDs (integers)
-   * @returns Audio data as Float32Array
+   * Synthesize speech from text
+   * @param text - Text to convert to speech
+   * @returns Audio data as WAV Blob and Float32Array
    */
-  async synthesize(phonemeIds: number[]): Promise<SynthesisResult> {
-    if (!this.ready || !this.session) {
-      throw new Error('Synthesizer not initialized. Call initialize() first.');
+  async synthesize(text: string): Promise<SynthesisResult> {
+    if (!this.ready) {
+      throw new Error("Synthesizer not initialized. Call initialize() first.");
+    }
+
+    const trimmed = text?.trim();
+    if (!trimmed) {
+      throw new Error("No text provided for synthesis");
     }
 
     try {
-      // Get ONNX Runtime (try global first, then dynamic import)
-      let ort: any;
-      if (typeof window !== 'undefined' && (window as any).ort) {
-        ort = (window as any).ort;
-      } else {
-        ort = await import('onnxruntime-web' as any);
-      }
+      // Use piper-tts-web to convert text to speech
+      // This handles text-to-phoneme conversion internally using espeak-ng
+      const wavBlob: Blob = await piperTts.predict({
+        text: trimmed,
+        voiceId: this.config.voiceId!,
+      });
 
-      // Dynamically import ONNX Runtime for Tensor creation
-
-      // Prepare input tensor
-      const inputTensor = new ort.Tensor('int64', BigInt64Array.from(phonemeIds.map(id => BigInt(id))), [1, phonemeIds.length]);
-
-      // Run inference
-      const outputs = await this.session.run({ input: inputTensor });
-
-      // Extract audio from output tensor
-      const audioTensor = outputs.output as Tensor;
-      const audioData = audioTensor.data as Float32Array;
+      // Convert Blob to Float32Array for direct playback
+      const arrayBuffer = await wavBlob.arrayBuffer();
+      const audioContext = new (window.AudioContext ||
+        (window as any).webkitAudioContext)();
+      const decodedBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      const audioData = decodedBuffer.getChannelData(0);
+      audioContext.close();
 
       return {
+        audioBlob: wavBlob,
         audio: audioData,
-        sampleRate: this.config.sampleRate!,
-        duration: audioData.length / this.config.sampleRate!,
+        sampleRate: decodedBuffer.sampleRate,
+        duration: decodedBuffer.duration,
       };
     } catch (error) {
       throw new Error(`Synthesis failed: ${error}`);
@@ -112,44 +131,59 @@ export class PiperSynthesizer {
   }
 
   /**
+   * Synthesize and return WAV Blob only (faster, no decoding)
+   */
+  async synthesizeToBlob(text: string): Promise<Blob> {
+    if (!this.ready) {
+      throw new Error("Synthesizer not initialized. Call initialize() first.");
+    }
+
+    const trimmed = text?.trim();
+    if (!trimmed) {
+      throw new Error("No text provided for synthesis");
+    }
+
+    return piperTts.predict({
+      text: trimmed,
+      voiceId: this.config.voiceId!,
+    });
+  }
+
+  /**
+   * Stop current synthesis (not directly supported, but we can track state)
+   */
+  stop(): void {
+    // Piper doesn't have a stop method, but we track state
+    console.log("Stop requested");
+  }
+
+  /**
    * Dispose of the synthesizer and free resources
    */
   async dispose(): Promise<void> {
-    if (this.session) {
-      await this.session.release();
-      this.session = null;
-      this.ready = false;
-    }
+    this.ready = false;
+    this.voiceLoaded = false;
   }
-}
-
-/**
- * Simple text-to-phoneme converter (placeholder)
- * In production, use a proper phonemizer like espeak-ng or piper's phonemizer
- */
-export function textToPhonemes(text: string): number[] {
-  // This is a VERY simplified placeholder
-  // Real implementation needs espeak-ng or piper's phonemizer
-  // For now, convert to character codes as a demo
-  const phonemes: number[] = [];
-  
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    if (code >= 32 && code <= 126) {
-      phonemes.push(code - 32); // Map to 0-94 range
-    }
-  }
-  
-  return phonemes;
 }
 
 /**
  * Create and initialize a Piper synthesizer
  */
-export async function createPiperSynthesizer(
-  config: PiperSynthesizerConfig
-): Promise<PiperSynthesizer> {
-  const synthesizer = new PiperSynthesizer(config);
-  await synthesizer.initialize();
-  return synthesizer;
+// export async function createPiperSynthesizer(
+//   config: PiperSynthesizerConfig = {}
+// ): Promise<PiperSynthesizer> {
+//   const synthesizer = new PiperSynthesizer(config);
+//   await synthesizer.initialize();
+//   return synthesizer;
+// }
+
+/**
+ * @deprecated Use PiperSynthesizer.synthesize() which handles text-to-phoneme internally
+ * This is kept for backwards compatibility but should not be used directly
+ */
+export function textToPhonemes(_text: string): number[] {
+  console.warn(
+    "textToPhonemes is deprecated. Use PiperSynthesizer.synthesize(text) instead."
+  );
+  return [];
 }
