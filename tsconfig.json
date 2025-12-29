@@ -14,12 +14,6 @@
     "rootDir": "src",
     "types": []
   },
-  "include": [
-    "src/**/*",
-    "sample/**/*"
-  ],
-  "exclude": [
-    "dist",
-    "node_modules"
-  ]
+  "include": ["src/**/*"],
+  "exclude": ["dist", "node_modules"]
 }

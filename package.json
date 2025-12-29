@@ -5,19 +5,19 @@
   "type": "module",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
-      "require": "./dist/index.cjs",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.cjs"
     },
     "./stt": {
+      "types": "./dist/stt/index.d.ts",
       "import": "./dist/stt/index.mjs",
-      "require": "./dist/stt/index.cjs",
-      "types": "./dist/stt/index.d.ts"
+      "require": "./dist/stt/index.cjs"
     },
     "./tts": {
+      "types": "./dist/tts/index.d.ts",
       "import": "./dist/tts/index.mjs",
-      "require": "./dist/tts/index.cjs",
-      "types": "./dist/tts/index.d.ts"
+      "require": "./dist/tts/index.cjs"
     },
     "./package.json": "./package.json"
   },
@@ -74,6 +74,6 @@
     "splitting": false
   },
   "dependencies": {
-    "onnxruntime-web": "^1.20.1"
+    "@realtimex/piper-tts-web": "^1.0.0"
   }
 }

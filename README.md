@@ -1,6 +1,13 @@
 # stt-tts-lib
 
-TypeScript utilities for speech-to-text (STT), voice activity detection (VAD), and text-to-speech (TTS) flows. Ships ESM/CJS bundles with declarations and simple samples to get you started.
+TypeScript utilities for speech-to-text (STT) and text-to-speech (TTS) in the browser. Ships ESM/CJS bundles with full TypeScript declarations.
+
+**Features:**
+
+- 🎤 **STT**: Browser-native speech recognition with session management
+- 🔊 **TTS**: Piper neural TTS with automatic model downloading
+- ✅ **Zero Config**: No manual ONNX setup required - everything is handled automatically
+- 📦 **Small**: ~135KB package size
 
 ## Quick Start
 
@@ -10,254 +17,551 @@ TypeScript utilities for speech-to-text (STT), voice activity detection (VAD), a
 npm install stt-tts-lib
 ```
 
-For Piper TTS (ONNX-based speech synthesis), see [SETUP_PIPER.md](./SETUP_PIPER.md) for complete setup instructions.
+### Basic Usage
 
-## Build & Scripts
+```typescript
+import { STTLogic, TTSLogic, createAudioPlayer } from "stt-tts-lib";
 
-- `npm run build` — bundle with tsup (ESM/CJS + d.ts) into `dist/`
-- `npm run lint` — type-check with `tsc --noEmit`
-- `npm run clean` — remove `dist/`
+// Speech-to-Text
+const stt = new STTLogic(
+  (msg, level) => console.log(`[${level}] ${msg}`),
+  (transcript) => console.log("Transcript:", transcript)
+);
+stt.start();
+
+// Text-to-Speech
+const synthesizer = new TTSLogic({
+  voiceId: "en_US-hfc_female-medium",
+});
+await synthesizer.initialize();
+const player = createAudioPlayer({ sampleRate: 22050 });
+
+const result = await synthesizer.synthesize("Hello world!");
+await player.play(result.audio, result.sampleRate);
+```
+
+## Vite Configuration (Required)
+
+For Vite-based projects, add this configuration to `vite.config.js`:
+
+```javascript
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  server: {
+    headers: {
+      // Required for SharedArrayBuffer (WASM multi-threading)
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+    },
+  },
+  optimizeDeps: {
+    // Force pre-bundling for dev server compatibility
+    include: ["onnxruntime-web", "@realtimex/piper-tts-web"],
+    esbuildOptions: {
+      target: "esnext",
+    },
+  },
+});
+```
+
+## Next.js Configuration (Required)
+
+For Next.js projects, you need additional configuration since this library uses browser-only APIs (Web Speech, Web Audio, ONNX WASM).
+
+### 1. Configure Headers in `next.config.js`
+
+```javascript
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  // Required for SharedArrayBuffer (WASM multi-threading)
+  async headers() {
+    return [
+      {
+        source: "/(.*)",
+        headers: [
+          {
+            key: "Cross-Origin-Opener-Policy",
+            value: "same-origin",
+          },
+          {
+            key: "Cross-Origin-Embedder-Policy",
+            value: "require-corp",
+          },
+        ],
+      },
+    ];
+  },
+  // Exclude ONNX from webpack bundling (it loads WASM dynamically)
+  webpack: (config, { isServer }) => {
+    if (!isServer) {
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        fs: false,
+        path: false,
+      };
+    }
+    return config;
+  },
+};
+
+module.exports = nextConfig;
+```
+
+### 2. Client-Side Only Usage
+
+Since this library uses browser APIs, you **must** ensure it only runs on the client:
+
+**Option A: Dynamic Import (Recommended)**
+
+```typescript
+"use client";
+
+import { useEffect, useState, useRef } from "react";
+import type { TTSLogic, AudioPlayer } from "stt-tts-lib";
+
+export default function SpeechComponent() {
+  const [isReady, setIsReady] = useState(false);
+  const ttsRef = useRef<TTSLogic | null>(null);
+  const playerRef = useRef<AudioPlayer | null>(null);
+
+  useEffect(() => {
+    // Dynamic import to avoid SSR
+    async function initTTS() {
+      const { TTSLogic, createAudioPlayer } = await import("stt-tts-lib");
+
+      ttsRef.current = new TTSLogic({
+        voiceId: "en_US-hfc_female-medium",
+      });
+      await ttsRef.current.initialize();
+
+      playerRef.current = createAudioPlayer({ sampleRate: 22050 });
+      setIsReady(true);
+    }
+
+    initTTS();
+
+    return () => {
+      ttsRef.current?.dispose();
+      playerRef.current?.close();
+    };
+  }, []);
+
+  const speak = async (text: string) => {
+    if (!ttsRef.current || !playerRef.current) return;
+    const result = await ttsRef.current.synthesize(text);
+    await playerRef.current.play(result.audio, result.sampleRate);
+  };
+
+  return (
+    <button onClick={() => speak("Hello from Next.js!")} disabled={!isReady}>
+      {isReady ? "Speak" : "Loading..."}
+    </button>
+  );
+}
+```
+
+**Option B: Using `next/dynamic` with `ssr: false`**
+
+```typescript
+// components/SpeechWrapper.tsx
+"use client";
+
+import dynamic from "next/dynamic";
+
+const SpeechComponent = dynamic(() => import("./SpeechComponent"), {
+  ssr: false,
+  loading: () => <p>Loading speech features...</p>,
+});
+
+export default SpeechComponent;
+```
+
+### 3. Complete Next.js Example with STT + TTS
+
+```typescript
+"use client";
+
+import { useEffect, useState, useRef, useCallback } from "react";
+import type { STTLogic, TTSLogic, AudioPlayer } from "stt-tts-lib";
+
+export default function VoiceChat() {
+  const [transcript, setTranscript] = useState("");
+  const [isListening, setIsListening] = useState(false);
+  const [isReady, setIsReady] = useState(false);
+
+  const sttRef = useRef<STTLogic | null>(null);
+  const ttsRef = useRef<TTSLogic | null>(null);
+  const playerRef = useRef<AudioPlayer | null>(null);
+
+  useEffect(() => {
+    async function init() {
+      const { STTLogic, TTSLogic, createAudioPlayer } = await import(
+        "stt-tts-lib"
+      );
+
+      // Initialize TTS
+      ttsRef.current = new TTSLogic({
+        voiceId: "en_US-hfc_female-medium",
+      });
+      await ttsRef.current.initialize();
+      playerRef.current = createAudioPlayer({ sampleRate: 22050 });
+
+      // Initialize STT
+      sttRef.current = new STTLogic(
+        (msg, level) => console.log(`[STT ${level}]`, msg),
+        (text) => setTranscript(text)
+      );
+
+      setIsReady(true);
+    }
+
+    init();
+
+    return () => {
+      sttRef.current?.destroy();
+      ttsRef.current?.dispose();
+      playerRef.current?.close();
+    };
+  }, []);
+
+  const toggleListening = useCallback(() => {
+    if (!sttRef.current) return;
+    if (isListening) {
+      sttRef.current.stop();
+    } else {
+      sttRef.current.start();
+    }
+    setIsListening(!isListening);
+  }, [isListening]);
+
+  const speak = async () => {
+    if (!ttsRef.current || !playerRef.current || !transcript) return;
+    const result = await ttsRef.current.synthesize(transcript);
+    await playerRef.current.play(result.audio, result.sampleRate);
+  };
+
+  if (!isReady) return <p>Loading speech features...</p>;
+
+  return (
+    <div>
+      <button onClick={toggleListening}>
+        {isListening ? "Stop Listening" : "Start Listening"}
+      </button>
+      <p>Transcript: {transcript}</p>
+      <button onClick={speak} disabled={!transcript}>
+        Read Aloud
+      </button>
+    </div>
+  );
+}
+```
 
 ## Exports
 
-- Main: `stt-tts-lib` → STT + TTS exports
-- STT-only: `stt-tts-lib/stt`
-- TTS-only: `stt-tts-lib/tts`
+```typescript
+// Main bundle (STT + TTS)
+import { STTLogic, TTSLogic, createAudioPlayer } from "stt-tts-lib";
+
+// STT only
+import { STTLogic, ResetSTTLogic, VADController } from "stt-tts-lib/stt";
+
+// TTS only
+import { TTSLogic, createAudioPlayer } from "stt-tts-lib/tts";
+```
 
 ## API Reference
 
-### STT
-- `STTLogic`
-  - Methods: `start()`, `stop()`, `destroy()`, `getFullTranscript()`, `clearTranscript()`, `setWordsUpdateCallback()`, `setMicTimeUpdateCallback()`, `setRestartMetricsCallback()`, `setVadCallbacks()`, `getSessionDurationMs()`, `isInAutoRestart()`, `updateInterim()`, `pushFinal()`
-  - Behavior: lightweight, timer-based auto-restart window (30s default), mockable via `now`
-- `ResetSTTLogic`
-  - Options: `maxSilenceMs`, `maxUtteranceMs`, `onReset(reason, stats)`, `now`
-  - Methods: `recordSpeechActivity()`, `updatePartialTranscript(text)`, `maybeReset()`, `forceReset(reason)`
-- `VADController`
-  - Options: `activation`, `release`, `hangoverFrames`, `smoothingWindow`, `now`, `onSpeechStart`, `onSpeechEnd`
-  - Methods: `start()`, `stop()`, `handleFrame(energy)`, `getState()`
+### STT (Speech-to-Text)
 
-### TTS
-- `preparePiperVoice(config)` → normalized Piper voice settings
-- `streamTokensToSpeech(tokens, options)` → batches tokens and calls `onChunk`
-- `createOrtEnvironment(config)` / `ensureOrtReady(config)` → minimal ORT bootstrap helper
-- `ensureVoiceLoaded(config)`, `warmupPiper(config, synth, text?)`, `resetVoiceCache()`
-- `getBackendLabel(device)`, `isCorruptModelError(err)`
-- Streaming helpers: `useStreamingTTS(options)`, `synthesizerWorker`, `playerWorker`, `handleChunk`, `emitSentence`, `nextBoundaryIndex`, `getAsyncIterator`, `SimpleQueue`
+#### `STTLogic`
 
-## Usage Examples
+Main speech recognition controller with session management.
 
-### STT + VAD (low-level)
-```ts
-import { ResetSTTLogic, VADController } from "stt-tts-lib/stt";
+```typescript
+const stt = new STTLogic(
+  // Log callback
+  (message: string, level?: string) => void,
+  // Transcript callback
+  (transcript: string) => void,
+  // Options
+  {
+    sessionDurationMs?: number,      // Session duration (default: 30000)
+    interimSaveIntervalMs?: number,  // Interim save interval (default: 5000)
+    preserveTranscriptOnStart?: boolean,
+  }
+);
 
-const vad = new VADController({ activation: -35, release: -45 });
+// Methods
+stt.start();                              // Start listening
+stt.stop();                               // Stop listening
+stt.destroy();                            // Cleanup resources
+stt.getFullTranscript();                  // Get accumulated transcript
+stt.clearTranscript();                    // Clear transcript
+stt.setWordsUpdateCallback((words) => {}); // Listen for word updates
+```
+
+#### `ResetSTTLogic`
+
+Low-level reset logic for custom STT implementations.
+
+```typescript
 const reset = new ResetSTTLogic({
   maxSilenceMs: 1500,
   maxUtteranceMs: 8000,
   onReset: (reason, stats) => console.log("reset", reason, stats),
 });
-
-const energies = [-60, -40, -32, -28, -42, -55];
-let ts = Date.now();
-for (const energy of energies) {
-  ts += 200;
-  const { state } = vad.handleFrame(energy, ts);
-  if (state === "speech") {
-    reset.recordSpeechActivity(ts);
-    reset.updatePartialTranscript("hello so far", ts);
-  }
-  reset.maybeReset(ts);
-}
 ```
 
-### STTLogic (session wrapper)
-```ts
-import { STTLogic } from "stt-tts-lib/stt";
+#### `VADController`
 
-const stt = new STTLogic({ sessionDurationMs: 20_000 });
-stt.setWordsUpdateCallback((finalText, interim) => {
-  console.log("final", finalText);
-  console.log("interim", interim);
+Voice Activity Detection controller.
+
+```typescript
+const vad = new VADController({
+  activation: -35,
+  release: -45,
+  hangoverFrames: 10,
 });
-stt.setMicTimeUpdateCallback((ms) => console.log("mic ms", ms));
+```
 
+### TTS (Text-to-Speech)
+
+#### `TTSLogic`
+
+Piper TTS synthesizer class. Voice models are downloaded automatically on first use.
+
+```typescript
+const synthesizer = new TTSLogic({
+  voiceId: "en_US-hfc_female-medium", // Piper voice ID
+});
+await synthesizer.initialize();
+
+// Synthesize text to audio
+const result = await synthesizer.synthesize("Hello world!");
+// result.audio: Float32Array
+// result.audioBlob: Blob (WAV format)
+// result.sampleRate: number
+// result.duration: number (seconds)
+
+// Get WAV blob only (faster, no decoding)
+const blob = await synthesizer.synthesizeToBlob("Hello world!");
+
+// Cleanup
+await synthesizer.dispose();
+```
+
+#### `createAudioPlayer(config)`
+
+Creates an audio player for playback.
+
+```typescript
+const player = createAudioPlayer({
+  sampleRate: 22050,
+});
+
+// Play audio
+await player.play(audioData, sampleRate);
+
+// Stop playback
+player.stop();
+
+// Cleanup
+await player.close();
+```
+
+### Available Piper Voices
+
+Voice models are downloaded automatically from CDN on first use (~20-80MB per voice).
+
+| Voice ID                  | Language     | Description                    |
+| ------------------------- | ------------ | ------------------------------ |
+| `en_US-hfc_female-medium` | English (US) | Female, medium quality         |
+| `en_US-lessac-medium`     | English (US) | Neutral, medium quality        |
+| `en_US-lessac-low`        | English (US) | Neutral, low quality (smaller) |
+| `en_US-lessac-high`       | English (US) | Neutral, high quality (larger) |
+| `en_GB-alba-medium`       | English (UK) | British accent                 |
+| `de_DE-thorsten-medium`   | German       | German voice                   |
+| `fr_FR-upmc-medium`       | French       | French voice                   |
+
+See [Piper Voices](https://rhasspy.github.io/piper-samples/) for the complete list.
+
+## Usage Examples
+
+### Complete STT Example
+
+```typescript
+import { STTLogic } from "stt-tts-lib";
+
+// Create STT instance
+const stt = new STTLogic(
+  (message, level) => console.log(`[STT ${level}] ${message}`),
+  (transcript) => {
+    document.getElementById("output")!.textContent = transcript;
+  },
+  {
+    sessionDurationMs: 30000,
+    interimSaveIntervalMs: 5000,
+  }
+);
+
+// Listen for individual words
+stt.setWordsUpdateCallback((words) => {
+  console.log("Heard words:", words);
+});
+
+// Start listening
 stt.start();
-stt.updateInterim("hello wor");
-stt.updateInterim("hello world");
-stt.pushFinal("hello world");
-stt.stop();
+
+// Stop after 10 seconds
+setTimeout(() => {
+  stt.stop();
+  console.log("Final transcript:", stt.getFullTranscript());
+}, 10000);
+
+// Cleanup on page unload
+window.addEventListener("beforeunload", () => stt.destroy());
 ```
 
-### TTS (Basic - Configuration Only)
-```ts
-import { preparePiperVoice, streamTokensToSpeech, createOrtEnvironment } from "stt-tts-lib/tts";
+### Complete TTS Example
 
-async function run() {
-  const voice = preparePiperVoice({ voiceId: "en_US-lessac" });
-  await createOrtEnvironment({ device: "cpu" });
+```typescript
+import { TTSLogic, createAudioPlayer } from "stt-tts-lib";
 
-  const tokens = ["Hello", " ", "world", "!"];
-  await streamTokensToSpeech(tokens, {
-    chunkSize: 10,
-    delayMs: 50,
-    onChunk: async (text) => console.log("streaming chunk:", text),
+async function speak(text: string) {
+  // Initialize (downloads voice model on first use)
+  const synthesizer = new TTSLogic({
+    voiceId: "en_US-hfc_female-medium",
   });
-}
-```
+  await synthesizer.initialize();
 
-### TTS (Complete - Real Synthesis with ONNX)
-```ts
-import { createPiperSynthesizer, textToPhonemes, createAudioPlayer } from "stt-tts-lib/tts";
+  const player = createAudioPlayer({ sampleRate: 22050 });
 
-async function synthesizeSpeech() {
-  // 1. Create and initialize synthesizer
-  const synthesizer = await createPiperSynthesizer({
-    modelPath: '/models/en_US-lessac-medium.onnx',
-    sampleRate: 22050
-  });
+  // Synthesize and play
+  const result = await synthesizer.synthesize(text);
+  console.log(`Generated ${result.duration.toFixed(2)}s of audio`);
 
-  // 2. Create audio player
-  const player = createAudioPlayer({
-    sampleRate: 22050,
-    volume: 1.0
-  });
-
-  // 3. Convert text to phonemes
-  const phonemes = textToPhonemes("Hello world!");
-
-  // 4. Synthesize audio
-  const result = await synthesizer.synthesize(phonemes);
-  console.log(`Synthesized ${result.duration.toFixed(2)}s of audio`);
-
-  // 5. Play audio
   await player.play(result.audio, result.sampleRate);
 
-  // 6. Cleanup
+  // Cleanup
   await synthesizer.dispose();
   await player.close();
 }
+
+// Usage
+speak("Hello! This is Piper text-to-speech running in your browser.");
 ```
 
-**Note:** The complete synthesis requires:
-- `npm install @onnxruntime/web`
-- Downloading Piper ONNX models from [HuggingFace](https://huggingface.co/rhasspy/piper-voices)
-- Setting up ONNX Runtime files in `public/ort/`
-- See [SETUP_PIPER.md](./SETUP_PIPER.md) for detailed setup instructions
+### Combined STT + TTS Example
 
-  const tokens = ["Hello", " world", "! Streaming TTS is easy."];
-  await streamTokensToSpeech(tokens, {
-    chunkSize: 12,
-    delayMs: 10,
-    onChunk: (text) => console.log("speak:", text),
+```typescript
+import {
+  STTLogic,
+  TTSLogic,
+  createAudioPlayer,
+  type AudioPlayer,
+} from "stt-tts-lib";
+
+let stt: STTLogic | null = null;
+let tts: TTSLogic | null = null;
+let player: AudioPlayer | null = null;
+
+async function init() {
+  // Initialize TTS
+  tts = new TTSLogic({
+    voiceId: "en_US-hfc_female-medium",
   });
+  await tts.initialize();
+  player = createAudioPlayer({ sampleRate: 22050 });
+
+  // Initialize STT with echo response
+  stt = new STTLogic(
+    (msg) => console.log(msg),
+    async (transcript) => {
+      console.log("You said:", transcript);
+
+      // Echo back what was heard
+      if (tts && player && transcript.trim()) {
+        const result = await tts.synthesize(`You said: ${transcript}`);
+        await player.play(result.audio, result.sampleRate);
+      }
+    }
+  );
 }
 
-run();
+// Start listening
+function startListening() {
+  stt?.start();
+}
+
+// Stop listening
+function stopListening() {
+  stt?.stop();
+}
+
+// Cleanup
+function cleanup() {
+  stt?.destroy();
+  tts?.dispose();
+  player?.close();
+}
 ```
 
-### Streaming TTS helper
-```ts
-import { useStreamingTTS } from "stt-tts-lib/tts";
-
-const tts = useStreamingTTS({
-  voice: { voiceId: "en_US-lessac" },
-  chunkSize: 32,
-  delayMs: 10,
-});
-
-await tts.ensureReady();
-await tts.addChunk("Hello there, this is a streaming TTS demo. ");
-await tts.addChunk("More text will be buffered and spoken.");
-await tts.finishStreaming();
-```
-
-## Documentation
-
-- **[SETUP_PIPER.md](./SETUP_PIPER.md)** - Complete Piper TTS setup, architecture, integration guide, and troubleshooting
-- **Samples**: See `sample/` directory for working examples
-
-## Setup for Browser-based TTS (Piper + ONNX)
-
-### 1. Install ONNX Runtime
+## Build & Scripts
 
 ```bash
-npm install @onnxruntime/web
+npm run build   # Bundle with tsup (ESM/CJS + d.ts) into dist/
+npm run lint    # Type-check with tsc --noEmit
+npm run clean   # Remove dist/
 ```
 
-### 2. Setup ONNX Runtime Files
+## Browser Compatibility
 
-Copy ONNX Runtime WASM and JavaScript files to your public folder:
+| Feature                  | Chrome | Firefox | Safari | Edge |
+| ------------------------ | ------ | ------- | ------ | ---- |
+| STT (Speech Recognition) | ✅     | ❌      | ✅     | ✅   |
+| TTS (Piper ONNX)         | ✅     | ✅      | ✅     | ✅   |
+| Web Audio API            | ✅     | ✅      | ✅     | ✅   |
 
-```bash
-# Create public/ort folder
-mkdir -p public/ort
-
-# Copy ONNX Runtime files (Windows)
-copy node_modules\onnxruntime-web\dist\*.wasm public\ort\
-copy node_modules\onnxruntime-web\dist\*.js public\ort\
-
-# Or on macOS/Linux:
-cp node_modules/onnxruntime-web/dist/*.wasm public/ort/
-cp node_modules/onnxruntime-web/dist/*.js public/ort/
-```
-
-**Files needed in `public/ort/`:**
-- `ort.all.min.js` - Main ONNX Runtime library
-- `ort-wasm-simd-threaded.wasm` - WASM runtime
-- `ort-wasm-simd-threaded.jsep.wasm` - JSEP backend (optional)
-
-### 3. Download Piper ONNX Models
-
-Create a `models/` folder and download Piper voices from [HuggingFace](https://huggingface.co/rhasspy/piper-voices):
-
-```bash
-# Create models folder
-mkdir -p models
-
-# Download a model (example: en_US-lessac-medium)
-# Option 1: Using curl/wget
-wget -O models/en_US-lessac-medium.onnx \
-  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
-
-# Option 2: Using PowerShell
-Invoke-WebRequest -Uri "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx" `
-  -OutFile "models/en_US-lessac-medium.onnx"
-```
-
-**Popular Models:**
-- `en_US-lessac-medium` (22MB) - Good quality, recommended
-- `en_US-lessac-low` (2.2MB) - Lower quality, smaller
-- `en_US-lessac-high` (80MB) - Highest quality
-- `en_GB-alan-medium` (22MB) - British English
-
-### 4. Update HTML Import Map
-
-Add this to your HTML `<head>`:
-
-```html
-<script type="importmap">
-  {
-    "imports": {
-      "onnxruntime-web": "/ort/ort.all.min.js"
-    }
-  }
-</script>
-```
-
-### 5. Test with Demo
-
-Open `sample/piper-complete-demo.html` in your browser:
-1. Click **"Demo"** tab
-2. Verify model path: `/models/en_US-lessac-medium.onnx`
-3. Click **"Initialize Synthesizer"**
-4. Enter text and click **"Synthesize & Play"**
+**Note:** Speech Recognition API requires Chrome, Safari, or Edge. Firefox does not support the Web Speech API.
 
 ## Troubleshooting
 
-- **ONNX Runtime not found**: Ensure `public/ort/` folder exists with `.wasm` and `.js` files
-- **Model fetch failed (404)**: Check model path and ensure `/models/` folder is served by your web server
-- **No audio output**: Verify browser supports Web Audio API and model initialization was successful
-- **Large file sizes**: Models range from 2MB to 80MB; consider using low-quality models for faster downloads
+### TTS Issues
 
-For more detailed TTS setup and architecture, see [SETUP_PIPER.md](./SETUP_PIPER.md).
+| Issue                | Solution                                                                                |
+| -------------------- | --------------------------------------------------------------------------------------- |
+| "Voice not found"    | Check voice ID spelling. Use `en_US-hfc_female-medium` for testing.                     |
+| Slow first synthesis | Normal - voice model (~20MB) downloads on first use. Subsequent calls use cached model. |
+| No audio output      | Ensure browser supports Web Audio API. Check volume and audio permissions.              |
+| CORS errors          | Ensure Vite config has proper COOP/COEP headers (see above).                            |
+
+### STT Issues
+
+| Issue                              | Solution                                                                                   |
+| ---------------------------------- | ------------------------------------------------------------------------------------------ |
+| "Speech Recognition not supported" | Use Chrome, Safari, or Edge. Firefox doesn't support Web Speech API.                       |
+| No transcript                      | Check microphone permissions. Ensure `stt.start()` was called.                             |
+| Transcript stops                   | Browser sessions timeout after ~30s. Library auto-restarts, but check `sessionDurationMs`. |
+
+### Dev Server Issues (Vite)
+
+| Issue                                           | Solution                                               |
+| ----------------------------------------------- | ------------------------------------------------------ |
+| "Module externalized for browser compatibility" | Add `optimizeDeps.include` in Vite config (see above). |
+| WASM loading errors                             | Ensure COOP/COEP headers are set in Vite config.       |
+| Works in production but not dev                 | Clear `.vite` cache: `rm -rf node_modules/.vite`       |
+
+### Next.js Issues
+
+| Issue                     | Solution                                                                    |
+| ------------------------- | --------------------------------------------------------------------------- |
+| "window is not defined"   | Use dynamic import inside `useEffect` or `next/dynamic` with `ssr: false`.  |
+| "document is not defined" | Same as above - library must only run on client side.                       |
+| SharedArrayBuffer errors  | Ensure COOP/COEP headers are set in `next.config.js` (see Next.js section). |
+| WASM file not loading     | Check browser console for CORS errors. Verify headers config is applied.    |
+| Hydration mismatch        | Wrap speech components with `dynamic(() => import(...), { ssr: false })`.   |
+
+## License
+
+MIT
