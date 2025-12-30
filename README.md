@@ -562,6 +562,30 @@ npm run clean   # Remove dist/
 | WASM file not loading     | Check browser console for CORS errors. Verify headers config is applied.    |
 | Hydration mismatch        | Wrap speech components with `dynamic(() => import(...), { ssr: false })`.   |
 
+## Built With
+
+This library leverages the following open-source tools and technologies:
+
+### Core Technologies
+
+- **[ONNX Runtime Web](https://github.com/microsoft/onnxruntime)** - Microsoft's cross-platform ML inference engine for running neural networks in the browser via WebAssembly
+- **[Piper TTS](https://github.com/rhasspy/piper)** - Fast, local neural text-to-speech system by Rhasspy using ONNX models
+- **[@realtimex/piper-tts-web](https://github.com/synesthesiam/piper)** - Browser-compatible wrapper for Piper TTS models
+
+### Browser APIs
+
+- **[Web Speech API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Speech_API)** - Native browser speech recognition (Chrome, Safari, Edge)
+- **[Web Audio API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API)** - High-level JavaScript API for audio processing and synthesis
+
+### AI Models
+
+- **[Piper Neural Voices](https://rhasspy.github.io/piper-samples/)** - High-quality multilingual TTS models trained using VITS (Conditional Variational Autoencoder with Adversarial Learning for End-to-End Text-to-Speech)
+  - Models support 40+ languages
+  - Quality ranges from low (~10MB) to high (~80MB) per voice
+  - Models automatically downloaded from CDN on first use
+
+
+
 ## License
 
 MIT
