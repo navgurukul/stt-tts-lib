@@ -74,6 +74,7 @@
     "splitting": false
   },
   "dependencies": {
-    "@realtimex/piper-tts-web": "^1.0.0"
+    "@realtimex/piper-tts-web": "^1.0.0",
+    "@ricky0123/vad-web": "^0.0.30"
   }
 }

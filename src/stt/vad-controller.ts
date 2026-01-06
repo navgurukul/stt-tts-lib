@@ -1,112 +1,143 @@
-export type VADState = "silence" | "speech";
+import { MicVAD, getDefaultRealTimeVADOptions } from "@ricky0123/vad-web";
 
-export interface VADOptions {
-  /** dBFS threshold that marks activation into speech. */
-  activation: number;
-  /** dBFS threshold that marks release back to silence. */
-  release: number;
-  /** Number of frames to wait before flipping back to silence. */
-  hangoverFrames?: number;
-  /** Window size for smoothing energy measurements. */
-  smoothingWindow?: number;
-  /** Optional clock override. */
-  now?: () => number;
-  onSpeechStart?: () => void;
-  onSpeechEnd?: () => void;
-}
+export type VADControllerOptions = {
+  bufferSize?: number;
+  minSpeechMs?: number;
+  minSilenceMs?: number;
+  energyThreshold?: number;
+  dynamicThresholdFactor?: number;
+  noiseFloorSmoothing?: number;
+  noiseFloorDecay?: number;
+  maxAmplitude?: number;
+};
 
-export interface VADDecision {
-  state: VADState;
-  changed: boolean;
-  timestamp: number;
-  energy: number;
-}
-
-/**
- * Lightweight VAD state machine that operates on pre-computed frame energies (e.g., dBFS).
- */
 export class VADController {
-  private readonly activation: number;
-  private readonly release: number;
-  private readonly hangoverFrames: number;
-  private readonly smoothingWindow: number;
-  private readonly now: () => number;
-  private readonly onSpeechStart?: () => void;
-  private readonly onSpeechEnd?: () => void;
+  private vad: MicVAD | null = null;
+  private voiceStartListeners = new Set<() => void>();
+  private voiceStopListeners = new Set<() => void>();
+  private running = false;
+  private options?: VADControllerOptions;
 
-  private active = false;
-  private state: VADState = "silence";
-  private hangover = 0;
-  private energyWindow: number[] = [];
-
-  constructor(options: VADOptions) {
-    this.activation = options.activation;
-    this.release = options.release;
-    this.hangoverFrames = options.hangoverFrames ?? 5;
-    this.smoothingWindow = options.smoothingWindow ?? 4;
-    this.now = options.now ?? (() => Date.now());
-    this.onSpeechStart = options.onSpeechStart;
-    this.onSpeechEnd = options.onSpeechEnd;
+  constructor(options?: VADControllerOptions) {
+    this.options = options;
   }
 
-  getState(): VADState {
-    return this.state;
-  }
-
-  start(): void {
-    this.active = true;
-    this.resetState();
-  }
-
-  stop(): void {
-    this.active = false;
-    this.resetState();
-  }
-
-  /**
-   * Push a new frame energy (dBFS). Returns the current state and whether it changed.
-   */
-  handleFrame(energy: number, timestamp?: number): VADDecision {
-    if (!this.active) {
-      return { state: this.state, changed: false, timestamp: timestamp ?? this.now(), energy };
-    }
-
-    const ts = timestamp ?? this.now();
-    this.energyWindow.push(energy);
-    if (this.energyWindow.length > this.smoothingWindow) {
-      this.energyWindow.shift();
-    }
-
-    const smoothed =
-      this.energyWindow.reduce((acc, val) => acc + val, 0) / this.energyWindow.length;
-
-    let changed = false;
-
-    if (this.state === "silence" && smoothed >= this.activation) {
-      this.state = "speech";
-      this.hangover = 0;
-      changed = true;
-      this.onSpeechStart?.();
-    } else if (this.state === "speech") {
-      if (smoothed >= this.release) {
-        this.hangover = 0;
-      } else {
-        this.hangover += 1;
-        if (this.hangover >= this.hangoverFrames) {
-          this.state = "silence";
-          this.hangover = 0;
-          changed = true;
-          this.onSpeechEnd?.();
-        }
+  public async start(): Promise<void> {
+    if (this.running && this.vad) {
+      if (!this.vad.listening) {
+        await this.vad.start();
       }
+      return;
     }
 
-    return { state: this.state, changed, timestamp: ts, energy: smoothed };
+    if (
+      typeof navigator === "undefined" ||
+      !navigator.mediaDevices ||
+      !navigator.mediaDevices.getUserMedia
+    ) {
+      throw new Error("Microphone access is not available.");
+    }
+
+    try {
+      const ortAny = (window as any).ort;
+      if (ortAny && ortAny.env && ortAny.env.wasm) {
+        ortAny.env.wasm.wasmPaths = "/ort/";
+      }
+
+      if (!this.vad) {
+        const defaultOptions = getDefaultRealTimeVADOptions("v5");
+        
+        // Configure custom options
+        this.vad = await MicVAD.new({
+          ...defaultOptions,
+          startOnLoad: false,
+          onSpeechStart: () => {
+            this.emitVoiceStart();
+          },
+          onSpeechEnd: (audio: Float32Array) => {
+            this.emitVoiceStop();
+          },
+          onVADMisfire: () => {
+          },
+          minSpeechMs: this.options?.minSpeechMs || 150,
+          positiveSpeechThreshold: 0.5,
+          negativeSpeechThreshold: 0.35,
+          redemptionMs: this.options?.minSilenceMs || 450,
+          preSpeechPadMs: 50,
+          processorType: "ScriptProcessor",
+
+          onnxWASMBasePath: "/ort/",
+          baseAssetPath: "/vad/",
+          workletOptions: {},
+        });
+      }
+
+      if (!this.vad.listening) {
+        await this.vad.start();
+      }
+      
+      this.running = true;
+    } catch (error: any) {
+      this.running = false;
+      throw new Error(
+        error?.message || "Failed to initialize voice activity detector"
+      );
+    }
   }
 
-  private resetState(): void {
-    this.state = "silence";
-    this.hangover = 0;
-    this.energyWindow = [];
+  public stop(): void {
+    if (!this.running || !this.vad) return;
+    try {
+      this.vad.pause();
+      this.running = false;
+    } catch (error) {
+    }
+  }
+
+  public destroy(): void {
+    this.stop();
+    if (this.vad) {
+      try {
+        this.vad.destroy();
+      } catch (error) {
+      }
+      this.vad = null;
+    }
+    this.voiceStartListeners.clear();
+    this.voiceStopListeners.clear();
+  }
+
+  public isActive(): boolean {
+    return this.running && this.vad !== null && this.vad.listening;
+  }
+
+  public onVoiceStart(listener: () => void): () => void {
+    this.voiceStartListeners.add(listener);
+    return () => this.voiceStartListeners.delete(listener);
+  }
+
+  public onVoiceStop(listener: () => void): () => void {
+    this.voiceStopListeners.add(listener);
+    return () => this.voiceStopListeners.delete(listener);
+  }
+
+  private emitVoiceStart(): void {
+    this.voiceStartListeners.forEach((listener) => {
+      try {
+        listener();
+      } catch (error) {
+        console.error("Error in voice start listener:", error);
+      }
+    });
+  }
+
+  private emitVoiceStop(): void {
+    this.voiceStopListeners.forEach((listener) => {
+      try {
+        listener();
+      } catch (error) {
+        console.error("Error in voice stop listener:", error);
+      }
+    });
   }
 }
