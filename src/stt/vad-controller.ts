@@ -1,3 +1,21 @@
+/**
+ * stt-tts-lib - Speech-to-Text and Text-to-Speech Library
+ * Copyright (C) 2026 Navgurukul
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 import { MicVAD, getDefaultRealTimeVADOptions } from "@ricky0123/vad-web";
 
 export type VADControllerOptions = {
@@ -46,7 +64,7 @@ export class VADController {
 
       if (!this.vad) {
         const defaultOptions = getDefaultRealTimeVADOptions("v5");
-        
+
         // Configure custom options
         this.vad = await MicVAD.new({
           ...defaultOptions,
@@ -57,8 +75,7 @@ export class VADController {
           onSpeechEnd: (audio: Float32Array) => {
             this.emitVoiceStop();
           },
-          onVADMisfire: () => {
-          },
+          onVADMisfire: () => {},
           minSpeechMs: this.options?.minSpeechMs || 150,
           positiveSpeechThreshold: 0.5,
           negativeSpeechThreshold: 0.35,
@@ -75,7 +92,7 @@ export class VADController {
       if (!this.vad.listening) {
         await this.vad.start();
       }
-      
+
       this.running = true;
     } catch (error: any) {
       this.running = false;
@@ -90,8 +107,7 @@ export class VADController {
     try {
       this.vad.pause();
       this.running = false;
-    } catch (error) {
-    }
+    } catch (error) {}
   }
 
   public destroy(): void {
@@ -99,8 +115,7 @@ export class VADController {
     if (this.vad) {
       try {
         this.vad.destroy();
-      } catch (error) {
-      }
+      } catch (error) {}
       this.vad = null;
     }
     this.voiceStartListeners.clear();

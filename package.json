@@ -1,8 +1,9 @@
 {
   "name": "speech-to-speech",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Speech-to-Text, VAD, and Text-to-Speech utilities for TypeScript projects.",
-  "license": "AGPL-3.0",
+  "license": "AGPL-3.0-or-later",
+  "author": "Navgurukul",
   "repository": {
     "type": "git",
     "url": "https://github.com/navgurukul/stt-tts-lib"

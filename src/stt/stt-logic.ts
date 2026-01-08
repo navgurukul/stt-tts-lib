@@ -1,10 +1,37 @@
+/**
+ * stt-tts-lib - Speech-to-Text and Text-to-Speech Library
+ * Copyright (C) 2026 Navgurukul
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 // Public callback/type aliases kept for backward compatibility with STTLogic API
 export type WordUpdateCallback = (words: string[]) => void;
 export type MicTimeUpdateCallback = (ms: number) => void;
-export type RestartMetricsCallback = (count: number, lastDuration: number | null) => void;
-export type VadCallbacks = { onSpeechStart?: () => void; onSpeechEnd?: () => void };
+export type RestartMetricsCallback = (
+  count: number,
+  lastDuration: number | null
+) => void;
+export type VadCallbacks = {
+  onSpeechStart?: () => void;
+  onSpeechEnd?: () => void;
+};
 
-type LogCallback = (message: string, type?: "info" | "error" | "warning") => void;
+type LogCallback = (
+  message: string,
+  type?: "info" | "error" | "warning"
+) => void;
 type TranscriptCallback = (transcript: string) => void;
 
 interface SpeechRecognitionEvent extends Event {
@@ -108,9 +135,7 @@ export class ResetSTTLogic {
     this.onMicTimeUpdate = callback;
   }
 
-  public setRestartMetricsCallback(
-    callback: RestartMetricsCallback
-  ): void {
+  public setRestartMetricsCallback(callback: RestartMetricsCallback): void {
     this.onRestartMetrics = callback;
   }
 
@@ -195,25 +220,31 @@ export class ResetSTTLogic {
       );
 
       if (!isFinal && this.lastWasFinal) {
-        try { this.onUserSpeechStart?.(); } catch {}
+        try {
+          this.onUserSpeechStart?.();
+        } catch {}
       }
 
       this.lastWasFinal = isFinal;
 
       if (isFinal) {
-        this.fullTranscript = (this.sessionStartTranscript + " " + completeTranscript).trim();
+        this.fullTranscript = (
+          this.sessionStartTranscript +
+          " " +
+          completeTranscript
+        ).trim();
         this.fullTranscript = this.collapseRepeats(this.fullTranscript);
-        
+
         this.heardWords = this.fullTranscript
           .split(/\s+/)
           .filter((word) => word.length > 0);
-          
+
         this.onTranscript(this.getFullTranscript());
         this.lastSavedLength = this.fullTranscript.length;
         if (this.onWordsUpdate) this.onWordsUpdate(this.heardWords);
-        
+
         this.lastInterimTranscript = "";
-        
+
         if (this.awaitingRestartFirstResultId != null) {
           const rid = this.awaitingRestartFirstResultId;
           if (
@@ -370,12 +401,21 @@ export class ResetSTTLogic {
   private saveInterimToFinal(): void {
     if (!this.lastInterimTranscript) return;
     const now = Date.now();
-    if (now - this.lastInterimResultTime > this.interimSaveInterval && this.lastInterimTranscript.length > this.lastSavedLength) {
-      this.fullTranscript = (this.fullTranscript + " " + this.lastInterimTranscript).trim();
+    if (
+      now - this.lastInterimResultTime > this.interimSaveInterval &&
+      this.lastInterimTranscript.length > this.lastSavedLength
+    ) {
+      this.fullTranscript = (
+        this.fullTranscript +
+        " " +
+        this.lastInterimTranscript
+      ).trim();
       this.fullTranscript = this.collapseRepeats(this.fullTranscript);
       this.lastSavedLength = this.fullTranscript.length;
       if (this.onWordsUpdate) {
-        const words = this.fullTranscript.split(/\s+/).filter(w => w.length > 0);
+        const words = this.fullTranscript
+          .split(/\s+/)
+          .filter((w) => w.length > 0);
         this.onWordsUpdate(words);
       }
       this.onTranscript(this.getFullTranscript());
@@ -459,7 +499,7 @@ export class ResetSTTLogic {
     );
 
     if (this.lastInterimTranscript.trim().length > 0) {
-       this.saveInterimToFinal();
+      this.saveInterimToFinal();
     }
 
     this.transcriptBeforeRestart = this.getFullTranscript();
@@ -571,7 +611,7 @@ export class ResetSTTLogic {
       } else {
         this.sessionStartTranscript = this.fullTranscript;
       }
-      
+
       this.micOnTime = 0;
       this.restartCount = 0;
       this.lastSavedLength = 0;
@@ -635,8 +675,7 @@ export class ResetSTTLogic {
           "start",
           this.startHandler as EventListener
         );
-    } catch (e) {
-    }
+    } catch (e) {}
   }
 }
 
