@@ -1,0 +1,25 @@
+# Source files
+src/
+temp/
+
+# Config files
+tsconfig.json
+tsup.config.ts
+vite.config.ts
+vite-onnx-plugin.ts
+.gitignore
+.github/
+
+# Development
+node_modules/
+.vscode/
+*.log
+*.tmp
+*.rtf
+
+# Samples and demos
+sample-consumer/
+public/
+
+# Build artifacts
+*.tgz
