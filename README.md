@@ -1,4 +1,4 @@
-# stt-tts-lib
+# speech-to-speech
 
 TypeScript utilities for speech-to-text (STT) and text-to-speech (TTS) in the browser. Ships ESM/CJS bundles with full TypeScript declarations.
 
@@ -14,13 +14,13 @@ TypeScript utilities for speech-to-text (STT) and text-to-speech (TTS) in the br
 ### Installation
 
 ```bash
-npm install stt-tts-lib
+npm install speech-to-speech
 ```
 
 ### Basic Usage
 
 ```typescript
-import { STTLogic, TTSLogic, createAudioPlayer } from "stt-tts-lib";
+import { STTLogic, TTSLogic, createAudioPlayer } from "speech-to-speech";
 
 // Speech-to-Text
 const stt = new STTLogic(
@@ -118,7 +118,7 @@ Since this library uses browser APIs, you **must** ensure it only runs on the cl
 "use client";
 
 import { useEffect, useState, useRef } from "react";
-import type { TTSLogic, AudioPlayer } from "stt-tts-lib";
+import type { TTSLogic, AudioPlayer } from "speech-to-speech";
 
 export default function SpeechComponent() {
   const [isReady, setIsReady] = useState(false);
@@ -128,7 +128,7 @@ export default function SpeechComponent() {
   useEffect(() => {
     // Dynamic import to avoid SSR
     async function initTTS() {
-      const { TTSLogic, createAudioPlayer } = await import("stt-tts-lib");
+      const { TTSLogic, createAudioPlayer } = await import("speech-to-speech");
 
       ttsRef.current = new TTSLogic({
         voiceId: "en_US-hfc_female-medium",
@@ -183,7 +183,7 @@ export default SpeechComponent;
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import type { STTLogic, TTSLogic, AudioPlayer } from "stt-tts-lib";
+import type { STTLogic, TTSLogic, AudioPlayer } from "speech-to-speech";
 
 export default function VoiceChat() {
   const [transcript, setTranscript] = useState("");
@@ -197,7 +197,7 @@ export default function VoiceChat() {
   useEffect(() => {
     async function init() {
       const { STTLogic, TTSLogic, createAudioPlayer } = await import(
-        "stt-tts-lib"
+        "speech-to-speech"
       );
 
       // Initialize TTS
@@ -261,13 +261,13 @@ export default function VoiceChat() {
 
 ```typescript
 // Main bundle (STT + TTS)
-import { STTLogic, TTSLogic, createAudioPlayer } from "stt-tts-lib";
+import { STTLogic, TTSLogic, createAudioPlayer } from "speech-to-speech";
 
 // STT only
-import { STTLogic, ResetSTTLogic, VADController } from "stt-tts-lib/stt";
+import { STTLogic, ResetSTTLogic, VADController } from "speech-to-speech/stt";
 
 // TTS only
-import { TTSLogic, createAudioPlayer } from "stt-tts-lib/tts";
+import { TTSLogic, createAudioPlayer } from "speech-to-speech/tts";
 ```
 
 ## API Reference
@@ -391,7 +391,7 @@ See [Piper Voices](https://rhasspy.github.io/piper-samples/) for the complete li
 ### Complete STT Example
 
 ```typescript
-import { STTLogic } from "stt-tts-lib";
+import { STTLogic } from "speech-to-speech";
 
 // Create STT instance
 const stt = new STTLogic(
@@ -426,7 +426,7 @@ window.addEventListener("beforeunload", () => stt.destroy());
 ### Complete TTS Example
 
 ```typescript
-import { TTSLogic, createAudioPlayer } from "stt-tts-lib";
+import { TTSLogic, createAudioPlayer } from "speech-to-speech";
 
 async function speak(text: string) {
   // Initialize (downloads voice model on first use)
@@ -460,7 +460,7 @@ import {
   TTSLogic,
   createAudioPlayer,
   type AudioPlayer,
-} from "stt-tts-lib";
+} from "speech-to-speech";
 
 let stt: STTLogic | null = null;
 let tts: TTSLogic | null = null;
@@ -583,8 +583,6 @@ This library leverages the following open-source tools and technologies:
   - Models support 40+ languages
   - Quality ranges from low (~10MB) to high (~80MB) per voice
   - Models automatically downloaded from CDN on first use
-
-
 
 ## License
 
