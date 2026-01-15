@@ -8,6 +8,7 @@ import { defineConfig } from "vite";
  * 2. Set proper CORS headers for SharedArrayBuffer
  * 3. Use CDN for WASM files (configured in ort-setup.js)
  */
+
 export default defineConfig({
   server: {
     port: 3000,

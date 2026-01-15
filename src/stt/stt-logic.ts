@@ -16,6 +16,9 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import { internalSpeechState } from "../internal/speech-state";
+import { FillerManager, FillerConfig } from "../tts/filler-manager";
+
 // Public callback/type aliases kept for backward compatibility with STTLogic API
 export type WordUpdateCallback = (words: string[]) => void;
 export type MicTimeUpdateCallback = (ms: number) => void;
@@ -47,6 +50,34 @@ export interface ResetSTTOptions {
   sessionDurationMs?: number;
   interimSaveIntervalMs?: number;
   preserveTranscriptOnStart?: boolean;
+
+  // Filler word configuration
+  /** Enable short filler (default: false) */
+  enableShortFiller?: boolean;
+  /** Enable long filler (default: false) */
+  enableLongFiller?: boolean;
+  /** Delay before short filler in ms (default: 5000) */
+  shortFillerDelayMs?: number;
+  /** Delay before long filler in ms (default: 10000) */
+  longFillerDelayMs?: number;
+  /** Fallback short filler if LLM fails */
+  shortFillerFallback?: string;
+  /** Fallback long filler if LLM fails */
+  longFillerFallback?: string;
+  /** Callback when filler is generated */
+  onFillerGenerated?: (type: "short" | "long", text: string) => void;
+
+  // LLM Configuration for dynamic fillers
+  /** LLM API URL (required for dynamic filler generation) */
+  llmApiUrl?: string;
+  /** LLM API Key */
+  llmApiKey?: string;
+  /** LLM Model name (default: "deepseek-chat") */
+  llmModel?: string;
+  /** LLM request timeout in ms (default: 3000) */
+  llmTimeoutMs?: number;
+  /** Language hint for LLM (e.g., "English", "Hindi") */
+  languageHint?: string;
 }
 
 // Alias to match previous public surface
@@ -62,7 +93,11 @@ export class ResetSTTLogic {
   private onWordsUpdate: WordUpdateCallback | null = null;
   private onMicTimeUpdate: MicTimeUpdateCallback | null = null;
   private onRestartMetrics: RestartMetricsCallback | null = null;
-  private options: Required<ResetSTTOptions>;
+  private options: {
+    sessionDurationMs: number;
+    interimSaveIntervalMs: number;
+    preserveTranscriptOnStart: boolean;
+  };
 
   private micOnTime: number = 0;
   private sessionDuration: number = 30000;
@@ -98,6 +133,7 @@ export class ResetSTTLogic {
   private isAutoRestarting: boolean = false;
   private onUserSpeechStart?: () => void;
   private onUserSpeechEnd?: () => void;
+  private fillerManager: FillerManager | null = null;
 
   constructor(
     onLog: LogCallback,
@@ -113,6 +149,33 @@ export class ResetSTTLogic {
     };
     this.sessionDuration = this.options.sessionDurationMs;
     this.interimSaveInterval = this.options.interimSaveIntervalMs;
+
+    // Initialize filler manager if any filler is enabled
+    if (options.enableShortFiller || options.enableLongFiller) {
+      this.fillerManager = new FillerManager({
+        enableShortFiller: options.enableShortFiller,
+        enableLongFiller: options.enableLongFiller,
+        shortFillerDelayMs: options.shortFillerDelayMs,
+        longFillerDelayMs: options.longFillerDelayMs,
+        shortFillerFallback: options.shortFillerFallback,
+        longFillerFallback: options.longFillerFallback,
+        // LLM configuration for dynamic filler generation
+        llmApiUrl: options.llmApiUrl,
+        llmApiKey: options.llmApiKey,
+        llmModel: options.llmModel,
+        llmTimeoutMs: options.llmTimeoutMs,
+        languageHint: options.languageHint,
+        onFillerGenerated: options.onFillerGenerated,
+      });
+      this.onLog(
+        `[STTLogic] Filler manager initialized (short: ${
+          options.enableShortFiller
+        }, long: ${options.enableLongFiller}, LLM: ${
+          options.llmApiUrl ? "configured" : "disabled"
+        })`,
+        "info"
+      );
+    }
 
     const SpeechRecognitionAPI =
       (window as any).SpeechRecognition ||
@@ -197,6 +260,11 @@ export class ResetSTTLogic {
       this.lastInterimTranscript = completeTranscript;
       this.lastInterimResultTime = Date.now();
 
+      // Update filler manager with current partial transcript
+      if (this.fillerManager && !isFinal) {
+        this.fillerManager.updatePartialTranscript(completeTranscript);
+      }
+
       if (this.awaitingRestartFirstResultId != null) {
         const rid = this.awaitingRestartFirstResultId;
         if (
@@ -220,6 +288,8 @@ export class ResetSTTLogic {
       );
 
       if (!isFinal && this.lastWasFinal) {
+        // User started speaking - notify internal speech state
+        internalSpeechState.setSpeaking(true);
         try {
           this.onUserSpeechStart?.();
         } catch {}
@@ -228,6 +298,12 @@ export class ResetSTTLogic {
       this.lastWasFinal = isFinal;
 
       if (isFinal) {
+        // User stopped speaking - notify internal speech state
+        internalSpeechState.setSpeaking(false);
+        try {
+          this.onUserSpeechEnd?.();
+        } catch {}
+
         this.fullTranscript = (
           this.sessionStartTranscript +
           " " +
@@ -657,6 +733,13 @@ export class ResetSTTLogic {
   public destroy(): void {
     this.isListening = false;
     this.stopMicTimer();
+
+    // Cleanup filler manager
+    if (this.fillerManager) {
+      this.fillerManager.destroy();
+      this.fillerManager = null;
+    }
+
     try {
       (this.recognition as any).abort?.();
     } catch (e) {}
@@ -676,6 +759,46 @@ export class ResetSTTLogic {
           this.startHandler as EventListener
         );
     } catch (e) {}
+  }
+
+  // ==========================================================================
+  // Filler Manager Methods
+  // ==========================================================================
+
+  /**
+   * Get the filler manager instance (if enabled)
+   */
+  getFillerManager(): FillerManager | null {
+    return this.fillerManager;
+  }
+
+  /**
+   * Set a custom synthesizer for filler audio generation.
+   * Optional - internal TTS is used by default.
+   */
+  setFillerSynthesizer(
+    synthesize: (
+      text: string
+    ) => Promise<{ audio: Float32Array; sampleRate: number }>
+  ): void {
+    if (this.fillerManager) {
+      this.fillerManager.setSynthesizer(synthesize);
+      this.onLog("[STTLogic] Custom filler synthesizer configured", "info");
+    }
+  }
+
+  /**
+   * Get the generated short filler text (null if not generated yet)
+   */
+  getShortFiller(): string | null {
+    return this.fillerManager?.shortFiller ?? null;
+  }
+
+  /**
+   * Get the generated long filler text (null if not generated yet)
+   */
+  getLongFiller(): string | null {
+    return this.fillerManager?.longFiller ?? null;
   }
 }
 

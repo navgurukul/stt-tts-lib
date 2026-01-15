@@ -173,6 +173,9 @@
       <!-- Tabs -->
       <div class="card">
         <div class="tabs">
+          <button class="tab-btn" onclick="switchTab('sts')">
+            🗣️ Speech-to-Speech
+          </button>
           <button class="tab-btn active" onclick="switchTab('stt')">
             Speech-to-Text
           </button>
@@ -182,6 +185,135 @@
           <button class="tab-btn" onclick="switchTab('info')">
             Library Info
           </button>
+        </div>
+
+        <!-- STS Tab -->
+        <div id="sts-tab" class="tab-content">
+          <h2>🗣️ Speech-to-Speech Demo</h2>
+          <p style="color: #666; margin-bottom: 1rem">
+            Full voice conversation: Speak → LLM processes → AI responds with
+            voice
+          </p>
+
+          <label>LLM API Configuration:</label>
+          <div
+            style="
+              display: grid;
+              grid-template-columns: 1fr 1fr;
+              gap: 10px;
+              margin-bottom: 1rem;
+            "
+          >
+            <input
+              type="text"
+              id="stsApiUrl"
+              placeholder="API URL (e.g., https://api.openai.com/v1/chat/completions)"
+              value="https://api.openai.com/v1/chat/completions"
+            />
+            <input
+              type="password"
+              id="stsApiKey"
+              placeholder="API Key"
+              value="<%= process.env.OPENAI_SECRET_KEY || '' %>"
+            />
+          </div>
+          <input
+            type="text"
+            id="stsModel"
+            placeholder="Model (e.g., gpt-4o-mini)"
+            value="gpt-4o-mini"
+            style="margin-bottom: 1rem"
+          />
+
+          <label>Voice ID:</label>
+          <input
+            type="text"
+            id="stsVoiceId"
+            value="en_US-hfc_female-medium"
+            placeholder="TTS Voice ID"
+          />
+
+          <div class="button-group">
+            <button class="btn-secondary" onclick="initSTS()" id="initStsBtn">
+              Initialize STS
+            </button>
+          </div>
+
+          <div
+            style="
+              display: grid;
+              grid-template-columns: 1fr 1fr;
+              gap: 1rem;
+              margin: 1rem 0;
+            "
+          >
+            <div>
+              <label>🎤 Your Speech:</label>
+              <textarea
+                id="stsUserTranscript"
+                readonly
+                placeholder="Speak and your words appear here..."
+                style="min-height: 120px"
+              ></textarea>
+            </div>
+            <div>
+              <label>🤖 AI Response:</label>
+              <textarea
+                id="stsAiResponse"
+                readonly
+                placeholder="AI response will appear here..."
+                style="min-height: 120px"
+              ></textarea>
+            </div>
+          </div>
+
+          <div class="button-group">
+            <button
+              class="btn-primary"
+              onclick="startSTS()"
+              id="startStsBtn"
+              disabled
+            >
+              🎙️ Start Conversation
+            </button>
+            <button
+              class="btn-danger"
+              onclick="stopSTS()"
+              id="stopStsBtn"
+              disabled
+            >
+              ⏹️ Stop
+            </button>
+          </div>
+
+          <div
+            id="stsStatus"
+            style="
+              padding: 12px;
+              background: #f5f5f5;
+              border-radius: 8px;
+              margin-top: 1rem;
+              text-align: center;
+            "
+          >
+            <span style="color: #666">Status: Not initialized</span>
+          </div>
+
+          <div
+            style="
+              margin-top: 1rem;
+              padding: 12px;
+              background: #fff3e0;
+              border-radius: 8px;
+              font-size: 13px;
+            "
+          >
+            <strong>💡 How it works:</strong><br />
+            1. Click "Start Conversation" and speak<br />
+            2. When you pause, your speech is sent to the LLM<br />
+            3. LLM response is automatically spoken back to you<br />
+            4. Continue the conversation naturally!
+          </div>
         </div>
 
         <!-- STT Tab -->
@@ -241,12 +373,14 @@
             </button>
           </div>
 
-          <label>Text to synthesize:</label>
+          <label
+            >Text to synthesize (multiple sentences for streaming demo):</label
+          >
           <textarea
             id="ttsText"
             placeholder="Enter text to convert to speech..."
           >
-Hello! This is a demonstration of the stt-tts-lib library. It works great!</textarea
+Hello and welcome to this advanced audio streaming demonstration where the goal is to clearly showcase how queued speech synthesis can significantly improve the listening experience for users who expect fast and natural feedback from a system, while the very first segment of speech begins playing immediately without waiting for the entire content to finish processing. Meanwhile, the remaining portions of the text continue to be synthesized in parallel across the system pipeline so that by the time the listener reaches the next pause, the following audio is already prepared and ready to play without any noticeable delay or interruption in flow. This approach greatly reduces perceived latency and makes long spoken responses feel smooth, responsive, and much more conversational, especially in real time interactive applications.</textarea
           >
 
           <div class="button-group">
@@ -256,9 +390,26 @@ Hello! This is a demonstration of the stt-tts-lib library. It works great!</text
               id="synthesizeBtn"
               disabled
             >
-              Synthesize & Play
+              Stream Synthesize & Play
             </button>
-            <button class="btn-danger" onclick="stopAudio()">Stop Audio</button>
+            <button class="btn-danger" onclick="stopAudio()">
+              Stop & Clear Queue
+            </button>
+          </div>
+
+          <div
+            style="
+              margin-top: 1rem;
+              padding: 12px;
+              background: #e3f2fd;
+              border-radius: 8px;
+              font-size: 13px;
+            "
+          >
+            <strong>💡 How it works:</strong> Text is split by punctuation into
+            sentences. Each sentence is synthesized and immediately added to the
+            audio queue. With <code>autoPlay: true</code>, playback starts as
+            soon as the first sentence is ready — no waiting for full synthesis!
           </div>
         </div>
 

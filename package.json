@@ -1,6 +1,6 @@
 {
   "name": "speech-to-speech",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Speech-to-Text, VAD, and Text-to-Speech utilities for TypeScript projects.",
   "license": "AGPL-3.0-or-later",
   "author": "Navgurukul",

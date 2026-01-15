@@ -65,5 +65,21 @@ export type {
   SynthesisResult,
 } from "./piper-synthesizer";
 
-export { AudioPlayer, createAudioPlayer } from "./audio-player";
-export type { AudioPlayerConfig } from "./audio-player";
+export {
+  AudioPlayer,
+  createAudioPlayer,
+  sharedAudioPlayer,
+} from "./audio-player";
+export type {
+  AudioPlayerConfig,
+  QueuedAudio,
+  AudioPlayerStatusCallback,
+  PlayingStateCallback,
+} from "./audio-player";
+
+export {
+  FillerManager,
+  getFillerManager,
+  configureFillerManager,
+} from "./filler-manager";
+export type { FillerConfig } from "./filler-manager";

@@ -25,12 +25,16 @@
  */
 
 import * as piperTts from "@realtimex/piper-tts-web";
+import { AudioPlayer, sharedAudioPlayer } from "./audio-player";
 
 export interface PiperSynthesizerConfig {
   /** Voice ID (e.g., "en_US-hfc_female-medium") */
   voiceId?: string;
   /** Sample rate (default: 22050) */
   sampleRate?: number;
+  /** Use shared audio player singleton (default: true) */
+  useSharedAudioPlayer?: boolean;
+  warmUp?: boolean;
 }
 
 export interface SynthesisResult {
@@ -54,13 +58,57 @@ export class TTSLogic {
   private config: PiperSynthesizerConfig;
   private ready = false;
   private voiceLoaded = false;
+  private audioPlayer?: AudioPlayer;
+  private useSharedPlayer: boolean;
+  private warmUp: boolean = true;
 
   constructor(config: PiperSynthesizerConfig = {}) {
     this.config = {
       voiceId: DEFAULT_VOICE_ID,
       sampleRate: 22050,
+      useSharedAudioPlayer: true,
+      warmUp: true,
       ...config,
     };
+    this.useSharedPlayer = this.config.useSharedAudioPlayer !== false;
+  }
+
+  /**
+   * Set a custom AudioPlayer (disables shared player for this instance)
+   */
+  setAudioPlayer(player: AudioPlayer): void {
+    this.audioPlayer = player;
+    this.useSharedPlayer = false;
+  }
+
+  /**
+   * Add audio to the queue (uses shared player by default, or custom if set)
+   */
+  addInternalAudioToQueue(audio: Float32Array, sampleRate?: number): void {
+    if (this.audioPlayer) {
+      // Use custom player if explicitly set
+      this.audioPlayer.addAudioIntoQueue(audio, sampleRate);
+    } else if (this.useSharedPlayer) {
+      // Use shared singleton player
+      sharedAudioPlayer.addAudioIntoQueue(audio, sampleRate);
+    }
+  }
+
+  async warmup(text = "warmup"): Promise<{ synthesized: boolean }> {
+    if (!this.voiceLoaded) {
+      throw new Error("Voice not loaded. Call initialize() first.");
+    }
+    try {
+      // Call piperTts.predict directly to avoid ready check (warmup runs before ready=true)
+      await piperTts.predict({
+        text,
+        voiceId: this.config.voiceId!,
+      });
+      console.log("✓ Piper synthesizer warmed up");
+      return { synthesized: true };
+    } catch (error) {
+      throw new Error(`Failed to warm up Piper synthesizer: ${error}`);
+    }
   }
 
   /**
@@ -90,8 +138,15 @@ export class TTSLogic {
       } else {
         console.log("✓ Voice found in cache");
       }
-
       this.voiceLoaded = true;
+      if (this.config.warmUp) {
+        const { synthesized } = await this.warmup();
+        if (!synthesized) {
+          throw new Error(
+            "Failed to warm up Piper synthesizer. Please check the voice model and try again."
+          );
+        }
+      }
       this.ready = true;
       console.log("✓ Piper synthesizer initialized");
     } catch (error) {
@@ -165,6 +220,17 @@ export class TTSLogic {
       text: trimmed,
       voiceId: this.config.voiceId!,
     });
+  }
+
+  /**
+   * Synthesize text and add to queue (uses shared player by default)
+   */
+  async synthesizeAndAddToQueue(text: string): Promise<void> {
+    if (!this.audioPlayer && !this.useSharedPlayer) {
+      throw new Error("No AudioPlayer set and shared player is disabled");
+    }
+    const result = await this.synthesize(text);
+    this.addInternalAudioToQueue(result.audio, result.sampleRate);
   }
 
   /**
