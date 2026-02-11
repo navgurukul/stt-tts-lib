@@ -11,9 +11,10 @@ import {
   STTLogic,
   TTSLogic,
   AudioPlayer,
-  createAudioPlayer,
   sharedAudioPlayer,
+  ensureWasmCached,
 } from "speech-to-speech";
+import type { WasmPaths } from "speech-to-speech";
 
 // Extend Window interface for global functions
 declare global {
@@ -24,6 +25,7 @@ declare global {
     initTTS: () => Promise<void>;
     synthesizeText: () => Promise<void>;
     stopAudio: () => void;
+    prefetchWasmCache: () => Promise<void>;
     // STS functions
     initSTS: () => Promise<void>;
     startSTS: () => void;
@@ -61,8 +63,69 @@ function clearLog() {
   if (logDiv) logDiv.innerHTML = "";
 }
 
+function getWasmBaseUrlFromUi(): string | undefined {
+  const input = document.getElementById("wasmBaseUrl") as
+    | HTMLInputElement
+    | null;
+  const baseUrl = input?.value?.trim() ?? "";
+  return baseUrl.length > 0 ? baseUrl : undefined;
+}
+
+function getWasmConfigFromUi(): {
+  wasmPaths?: WasmPaths;
+  enableWasmCache?: boolean;
+} {
+  const enableCacheEl = document.getElementById("enableWasmCache") as
+    | HTMLInputElement
+    | null;
+  const enableWasmCache = enableCacheEl?.checked ?? true;
+
+  const baseUrl = getWasmBaseUrlFromUi();
+  const onnxInput = document.getElementById("onnxWasmUrl") as
+    | HTMLInputElement
+    | null;
+  const onnxWasm = onnxInput?.value?.trim() ?? "";
+
+  if (!baseUrl) {
+    return { enableWasmCache };
+  }
+
+  const wasmPaths: WasmPaths = {
+    piperData: `${baseUrl}.data`,
+    piperWasm: `${baseUrl}.wasm`,
+  };
+  if (onnxWasm) {
+    wasmPaths.onnxWasm = onnxWasm;
+  }
+
+  return { enableWasmCache, wasmPaths };
+}
+
 // Expose to window for HTML onclick handlers
 window.clearLog = clearLog;
+window.prefetchWasmCache = async function () {
+  try {
+    const { enableWasmCache } = getWasmConfigFromUi();
+    if (enableWasmCache === false) {
+      addLog("WASM cache is disabled. Enable it to prefetch.", "info");
+      return;
+    }
+
+    const baseUrl = getWasmBaseUrlFromUi();
+    addLog(
+      baseUrl
+        ? `Prefetching WASM assets from ${baseUrl}...`
+        : "Prefetching WASM assets from the default CDN...",
+      "info"
+    );
+
+    await ensureWasmCached(baseUrl);
+    addLog("✓ WASM assets cached (blob URLs ready)", "success");
+  } catch (error: any) {
+    addLog(`✗ Failed to prefetch WASM assets: ${error.message}`, "error");
+    console.error(error);
+  }
+};
 
 //=============================================================================
 // STT Functions
@@ -275,7 +338,8 @@ window.initSTS = async function () {
     );
 
     // Initialize TTS
-    stsTTS = new TTSLogic({ voiceId });
+    const wasmConfig = getWasmConfigFromUi();
+    stsTTS = new TTSLogic({ voiceId, ...wasmConfig });
     await stsTTS.initialize();
     addLog("✓ TTS initialized", "success");
 
@@ -391,8 +455,10 @@ window.initTTS = async function () {
     }
 
     // Create synthesizer using the Piper library
+    const wasmConfig = getWasmConfigFromUi();
     piperSynthesizer = new TTSLogic({
       voiceId: voiceInput,
+      ...wasmConfig,
     });
     await piperSynthesizer.initialize();
 

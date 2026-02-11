@@ -24,8 +24,9 @@
  * so NO separate ort-setup.js is needed!
  */
 
-import * as piperTts from "@realtimex/piper-tts-web";
+import { TtsSession, download, stored, WASM_BASE } from "@realtimex/piper-tts-web";
 import { AudioPlayer, sharedAudioPlayer } from "./audio-player";
+import { ensureWasmCached, type WasmPaths } from "./wasm-cache.js";
 
 export interface PiperSynthesizerConfig {
   /** Voice ID (e.g., "en_US-hfc_female-medium") */
@@ -35,6 +36,20 @@ export interface PiperSynthesizerConfig {
   /** Use shared audio player singleton (default: true) */
   useSharedAudioPlayer?: boolean;
   warmUp?: boolean;
+  /**
+   * Custom paths for WASM files.  When provided the library will use these
+   * URLs directly instead of the CDN, which is useful for self-hosting
+   * (e.g. from a `public/piper-wasm/` folder).
+   *
+   * If omitted the library automatically caches the CDN assets via the
+   * Cache API so they are only downloaded once.
+   */
+  wasmPaths?: WasmPaths;
+  /**
+   * Disable the automatic Cache API caching of WASM assets.
+   * Defaults to `true` (caching enabled).
+   */
+  enableWasmCache?: boolean;
 }
 
 export interface SynthesisResult {
@@ -61,6 +76,7 @@ export class TTSLogic {
   private audioPlayer?: AudioPlayer;
   private useSharedPlayer: boolean;
   private warmUp: boolean = true;
+  private ttsSession: TtsSession | null = null;
 
   constructor(config: PiperSynthesizerConfig = {}) {
     this.config = {
@@ -68,6 +84,7 @@ export class TTSLogic {
       sampleRate: 22050,
       useSharedAudioPlayer: true,
       warmUp: true,
+      enableWasmCache: true,
       ...config,
     };
     this.useSharedPlayer = this.config.useSharedAudioPlayer !== false;
@@ -99,11 +116,12 @@ export class TTSLogic {
       throw new Error("Voice not loaded. Call initialize() first.");
     }
     try {
-      // Call piperTts.predict directly to avoid ready check (warmup runs before ready=true)
-      await piperTts.predict({
-        text,
-        voiceId: this.config.voiceId!,
-      });
+      // Use TtsSession.predict directly to avoid ready check (warmup runs before ready=true)
+      if (this.ttsSession) {
+        await this.ttsSession.predict(text);
+      } else {
+        throw new Error("TtsSession not created yet");
+      }
       console.log("✓ Piper synthesizer warmed up");
       return { synthesized: true };
     } catch (error) {
@@ -121,15 +139,40 @@ export class TTSLogic {
       const voiceId = this.config.voiceId!;
       console.log("📍 Loading Piper voice:", voiceId);
 
-      // Check if voice is already cached
-      const storedVoices = await piperTts.stored();
+      // --- Step 1: resolve WASM paths (custom, cached, or CDN) ----------
+      let wasmPaths: { onnxWasm: string; piperData: string; piperWasm: string };
+
+      if (this.config.wasmPaths) {
+        // Consumer provided explicit paths (e.g. self-hosted from public/)
+        console.log("📦 Using custom WASM paths");
+        wasmPaths = {
+          onnxWasm: this.config.wasmPaths.onnxWasm ?? TtsSession.WASM_LOCATIONS.onnxWasm,
+          piperData: this.config.wasmPaths.piperData,
+          piperWasm: this.config.wasmPaths.piperWasm,
+        };
+      } else if (this.config.enableWasmCache !== false) {
+        // Use Cache API to persist CDN blobs as Blob URLs
+        console.log("📦 Caching WASM assets via Cache API...");
+        const cached = await ensureWasmCached(WASM_BASE);
+        wasmPaths = {
+          onnxWasm: TtsSession.WASM_LOCATIONS.onnxWasm,
+          piperData: cached.piperData,
+          piperWasm: cached.piperWasm,
+        };
+      } else {
+        // Fall back to default CDN URLs (original behaviour)
+        wasmPaths = { ...TtsSession.WASM_LOCATIONS };
+      }
+
+      // --- Step 2: download / cache the voice model --------------------
+      const storedVoices = await stored();
       const alreadyCached = Array.isArray(storedVoices)
         ? storedVoices.includes(voiceId)
         : false;
 
       if (!alreadyCached) {
         console.log("⬇️ Downloading voice model...");
-        await piperTts.download(voiceId, (progress) => {
+        await download(voiceId, (progress) => {
           if (progress?.total) {
             const pct = Math.round((progress.loaded * 100) / progress.total);
             console.log(`⬇️ Downloading: ${pct}%`);
@@ -138,7 +181,17 @@ export class TTSLogic {
       } else {
         console.log("✓ Voice found in cache");
       }
+
+      // --- Step 3: create TtsSession with resolved WASM paths ----------
+      this.ttsSession = new TtsSession({
+        voiceId: voiceId as any,
+        wasmPaths,
+        logger: (msg) => console.log(`[piper] ${msg}`),
+      });
+      await this.ttsSession.waitReady;
+
       this.voiceLoaded = true;
+
       if (this.config.warmUp) {
         const { synthesized } = await this.warmup();
         if (!synthesized) {
@@ -177,12 +230,10 @@ export class TTSLogic {
     }
 
     try {
-      // Use piper-tts-web to convert text to speech
-      // This handles text-to-phoneme conversion internally using espeak-ng
-      const wavBlob: Blob = await piperTts.predict({
-        text: trimmed,
-        voiceId: this.config.voiceId!,
-      });
+      // Use TtsSession directly — WASM paths were already resolved during
+      // initialize() so Emscripten reads from blob: URLs / local paths
+      // instead of re-downloading from the CDN.
+      const wavBlob: Blob = await this.ttsSession!.predict(trimmed);
 
       // Convert Blob to Float32Array for direct playback
       const arrayBuffer = await wavBlob.arrayBuffer();
@@ -216,10 +267,7 @@ export class TTSLogic {
       throw new Error("No text provided for synthesis");
     }
 
-    return piperTts.predict({
-      text: trimmed,
-      voiceId: this.config.voiceId!,
-    });
+    return this.ttsSession!.predict(trimmed);
   }
 
   /**
@@ -247,6 +295,10 @@ export class TTSLogic {
   async dispose(): Promise<void> {
     this.ready = false;
     this.voiceLoaded = false;
+    this.ttsSession = null;
+    // Note: TtsSession is a singleton in the upstream library so it
+    // persists across instances.  We null out our reference to allow GC
+    // but the global singleton will remain until the page is reloaded.
   }
 }
 

@@ -42,7 +42,7 @@ npm run build
 npm pack
 ```
 
-This creates `stt-tts-lib-0.1.0.tgz`.
+This creates `speech-to-speech-0.1.3.tgz`.
 
 ### 2. Install dependencies in this sample
 
@@ -108,7 +108,7 @@ This starts a development server at `http://localhost:3000`.
 #### Method 1: Install from .tgz Package
 
 ```bash
-npm install /path/to/stt-tts-lib-0.1.0.tgz
+npm install /path/to/speech-to-speech-0.1.3.tgz
 ```
 
 Or in `package.json`:
@@ -116,7 +116,7 @@ Or in `package.json`:
 ```json
 {
   "dependencies": {
-    "stt-tts-lib": "file:../path/to/stt-tts-lib-0.1.0.tgz",
+    "speech-to-speech": "file:../path/to/speech-to-speech-0.1.3.tgz",
     "onnxruntime-web": "^1.20.1"
   }
 }
@@ -237,6 +237,26 @@ async function synthesizeAndPlay(text) {
 
 // Use it
 synthesizeAndPlay('Hello! This is a test of the TTS system.');
+```
+
+### WASM Caching (New)
+
+The library now caches `piper_phonemize.data` and `piper_phonemize.wasm`
+automatically via the browser Cache API. You can also self-host the assets
+and provide explicit paths:
+
+```javascript
+import { TTSLogic } from 'stt-tts-lib';
+
+const tts = new TTSLogic({
+  voiceId: 'en_US-hfc_female-medium',
+  enableWasmCache: true,
+  wasmPaths: {
+    piperData: '/piper-wasm/piper_phonemize.data',
+    piperWasm: '/piper-wasm/piper_phonemize.wasm'
+  }
+});
+await tts.initialize();
 ```
 
 ### Streaming TTS Example

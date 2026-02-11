@@ -78,6 +78,13 @@ export type {
 } from "./audio-player";
 
 export {
+  ensureWasmCached,
+  isWasmCached,
+  clearWasmCache,
+} from "./wasm-cache";
+export type { WasmPaths, WasmCacheResult } from "./wasm-cache";
+
+export {
   FillerManager,
   getFillerManager,
   configureFillerManager,
