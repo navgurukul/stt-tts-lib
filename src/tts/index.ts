@@ -59,10 +59,11 @@ export type {
   StreamingTTSOptions,
 } from "./use-streaming-tts";
 
-export { TTSLogic, textToPhonemes } from "./piper-synthesizer";
+export { TTSLogic, textToPhonemes, cleanTextForTTS, prefetchTTSModel } from "./piper-synthesizer";
 export type {
   PiperSynthesizerConfig,
   SynthesisResult,
+  CleanTextOptions,
 } from "./piper-synthesizer";
 
 export {

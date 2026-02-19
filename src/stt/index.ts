@@ -34,3 +34,8 @@ export type {
   RestartMetricsCallback,
   VadCallbacks,
 } from "./stt-logic.js";
+
+export {
+  getCompatibilityInfo,
+} from "./stt-logic.js";
+export type { CompatibilityInfo } from "./stt-logic.js";

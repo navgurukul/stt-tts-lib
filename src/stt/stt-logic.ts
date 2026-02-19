@@ -78,6 +78,13 @@ export interface ResetSTTOptions {
   llmTimeoutMs?: number;
   /** Language hint for LLM (e.g., "English", "Hindi") */
   languageHint?: string;
+
+  /**
+   * Called on every interim (non-final) recognition result with the current
+   * partial transcript text. Useful for real‑time UI updates.
+   * Does not affect the final transcript or setWordsUpdateCallback.
+   */
+  onInterimTranscript?: (text: string) => void;
 }
 
 // Alias to match previous public surface
@@ -107,6 +114,7 @@ export class ResetSTTLogic {
   private isRestarting: boolean = false;
   private isRecognitionRunning: boolean = false;
   private lastInterimTranscript: string = "";
+  private onInterimTranscriptCallback?: (text: string) => void;
   private lastInterimSaveTime: number = 0;
   private interimSaveInterval: number = 1000;
   private lastInterimResultTime: number = 0;
@@ -149,6 +157,7 @@ export class ResetSTTLogic {
     };
     this.sessionDuration = this.options.sessionDurationMs;
     this.interimSaveInterval = this.options.interimSaveIntervalMs;
+    this.onInterimTranscriptCallback = options.onInterimTranscript;
 
     // Initialize filler manager if any filler is enabled
     if (options.enableShortFiller || options.enableLongFiller) {
@@ -296,6 +305,10 @@ export class ResetSTTLogic {
       }
 
       this.lastWasFinal = isFinal;
+
+      if (!isFinal && this.onInterimTranscriptCallback) {
+        this.onInterimTranscriptCallback(completeTranscript);
+      }
 
       if (isFinal) {
         // User stopped speaking - notify internal speech state
@@ -800,6 +813,51 @@ export class ResetSTTLogic {
   getLongFiller(): string | null {
     return this.fillerManager?.longFiller ?? null;
   }
+}
+
+// ==========================================================================
+// Browser Compatibility Helper
+// ==========================================================================
+
+export interface CompatibilityInfo {
+  /** Whether the Web Speech Recognition API is available in this browser */
+  stt: boolean;
+  /** Whether Piper TTS is supported (Web Audio API present) */
+  tts: boolean;
+  /** Detected browser label */
+  browser: "Chrome" | "Edge" | "Firefox" | "Safari" | "unknown";
+}
+
+/**
+ * Returns a snapshot of browser feature support relevant to this library.
+ * Useful for gating UI elements or showing user-friendly warnings before
+ * attempting to start STT or TTS.
+ *
+ * @example
+ * const { stt, browser } = getCompatibilityInfo();
+ * if (!stt) alert(`Speech input is not supported in ${browser}.`);
+ */
+export function getCompatibilityInfo(): CompatibilityInfo {
+  const userAgent =
+    typeof navigator !== "undefined" ? navigator.userAgent || "" : "";
+
+  let browser: CompatibilityInfo["browser"] = "unknown";
+  // Edge must be checked before Chrome because Edge UA also contains "Chrome"
+  if (userAgent.includes("Edg/") || userAgent.includes("Edge/"))
+    browser = "Edge";
+  else if (userAgent.includes("Chrome")) browser = "Chrome";
+  else if (userAgent.includes("Firefox")) browser = "Firefox";
+  else if (userAgent.includes("Safari")) browser = "Safari";
+
+  const stt =
+    typeof window !== "undefined" &&
+    !!((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
+
+  const tts =
+    typeof window !== "undefined" &&
+    !!(window.AudioContext || (window as any).webkitAudioContext);
+
+  return { stt, tts, browser };
 }
 
 // Backward-compatible alias so consumers can import STTLogic as before

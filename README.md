@@ -6,6 +6,7 @@ TypeScript utilities for speech-to-text (STT) and text-to-speech (TTS) in the br
 
 - 🎤 **STT**: Browser-native speech recognition with session management
 - 🔊 **TTS**: Piper neural TTS with automatic model downloading
+- ⚡ **WASM Caching**: Automatic browser caching eliminates repeated downloads
 - 🎵 **Shared Audio Queue**: Auto-play audio queue for seamless playback
 - ✅ **Zero Config**: No manual ONNX setup required - everything is handled automatically
 - 📦 **Small**: ~135KB package size
@@ -37,7 +38,7 @@ stt.start();
 
 // Text-to-Speech with auto-play queue
 const tts = new TTSLogic({ voiceId: "en_US-hfc_female-medium" });
-await tts.initialize();
+await tts.initialize(); // WASM files cached automatically
 
 const result = await tts.synthesize("Hello world!");
 sharedAudioPlayer.addAudioIntoQueue(result.audio, result.sampleRate);
@@ -255,24 +256,41 @@ export default function SpeechComponent() {
 ## Exports
 
 ```typescript
-// Main bundle (STT + TTS)
+// Main bundle (STT + TTS + Service wrapper)
 import {
+  // Service wrapper (new in 0.1.4)
+  createSpeechService,
+  // STT
   STTLogic,
+  getCompatibilityInfo,
+  // TTS
   TTSLogic,
+  prefetchTTSModel,
+  cleanTextForTTS,
   AudioPlayer,
   createAudioPlayer,
   sharedAudioPlayer,
 } from "speech-to-speech";
 
 // STT only
-import { STTLogic, ResetSTTLogic, VADController } from "speech-to-speech/stt";
+import {
+  STTLogic,
+  ResetSTTLogic,
+  VADController,
+  getCompatibilityInfo,      // new in 0.1.4
+} from "speech-to-speech/stt";
 
 // TTS only
 import {
   TTSLogic,
+  prefetchTTSModel,          // new in 0.1.4
+  cleanTextForTTS,           // new in 0.1.4
   AudioPlayer,
   createAudioPlayer,
   sharedAudioPlayer,
+  ensureWasmCached,
+  isWasmCached,
+  clearWasmCache,
 } from "speech-to-speech/tts";
 ```
 
@@ -323,7 +341,8 @@ Piper TTS synthesizer. Voice models download automatically on first use.
 ```typescript
 const tts = new TTSLogic({
   voiceId: "en_US-hfc_female-medium", // Piper voice ID
-  warmUp: true, // Pre-warm the model (default: true)
+  warmUp: true,                        // Pre-warm the model (default: true)
+  enableWasmCache: true,               // Cache WASM assets (default: true)
 });
 await tts.initialize();
 
@@ -339,6 +358,51 @@ await tts.synthesizeAndAddToQueue("Hello world!");
 
 // Cleanup
 await tts.dispose();
+```
+
+#### WASM Caching (New in 0.1.3)
+
+The library automatically caches `piper_phonemize.data` (~9MB) and `piper_phonemize.wasm` in the browser Cache API. This eliminates repeated network downloads on every synthesis call.
+
+**Zero-config (recommended):**
+```typescript
+const tts = new TTSLogic({ voiceId: "en_US-hfc_female-medium" });
+await tts.initialize();
+// WASM files cached automatically after first download
+```
+
+**Self-hosted WASM files:**
+```typescript
+const tts = new TTSLogic({
+  voiceId: "en_US-hfc_female-medium",
+  wasmPaths: {
+    piperData: "/piper-wasm/piper_phonemize.data",
+    piperWasm: "/piper-wasm/piper_phonemize.wasm",
+    onnxWasm: "/ort/ort-wasm-simd.wasm", // optional
+  },
+});
+```
+
+**Disable caching:**
+```typescript
+const tts = new TTSLogic({
+  voiceId: "en_US-hfc_female-medium",
+  enableWasmCache: false, // Uses CDN URLs directly
+});
+```
+
+**Utility functions:**
+```typescript
+import { ensureWasmCached, isWasmCached, clearWasmCache } from "speech-to-speech/tts";
+
+// Prefetch WASM assets before initialization
+await ensureWasmCached(); // Returns { piperData: blob:..., piperWasm: blob:... }
+
+// Check if cached
+const cached = await isWasmCached(); // true/false
+
+// Clear cache
+await clearWasmCache();
 ```
 
 ### Audio Playback
@@ -569,9 +633,137 @@ function stop() {
 }
 ```
 
+## Unified Speech Service
+
+`createSpeechService()` wires STT and TTS together so you need fewer imports and no manual callback plumbing.
+
+```ts
+import { createSpeechService } from "speech-to-speech";
+
+const service = createSpeechService();
+
+// 1. Set up STT
+service.initializeSTT({
+  onTranscript: (text) => console.log("Final:", text),
+  onInterimTranscript: (text) => setLiveCaption(text), // real-time display
+  onWordsUpdate: (words) => console.log("Words so far:", words),
+  onStatusChange: (type, data) => {
+    if (type === "speaking") setUserSpeaking(data as boolean);
+  },
+});
+
+// 2. Set up TTS (awaitable)
+await service.initializeTTS({ voiceId: "en_US-hfc_female-medium" });
+
+// 3. Start session
+service.startListening();
+await service.speak("Hello, how can I help you?");
+
+// 4. End session
+const transcript = service.stopListening();
+service.stopSpeaking();
+```
+
+---
+
+## Interim Transcript Streaming
+
+Get real-time partial results while the user is still speaking. Pass `onInterimTranscript` directly to `initializeSTT()`:
+
+```ts
+import { createSpeechService } from "speech-to-speech";
+
+const service = createSpeechService();
+
+service.initializeSTT({
+  onTranscript: (finalText) => console.log("Final:", finalText),
+  onInterimTranscript: (partialText) => {
+    // Called on every interim result — great for live captions
+    liveCaption.textContent = partialText;
+  },
+});
+
+await service.initializeTTS({ voiceId: "en_US-hfc_female-medium" });
+service.startListening();
+```
+
+---
+
+## TTS Warmup
+
+Call `prefetchTTSModel()` early in your app boot (e.g. after page load) so the first `speak()` call has no cold-start delay:
+
+```ts
+import { prefetchTTSModel } from "speech-to-speech";
+
+// Fire-and-forget — safe to call before the user interacts
+prefetchTTSModel("en_US-hfc_female-medium");
+
+// Later, when the user actually triggers speech:
+const tts = new TTSLogic({ voiceId: "en_US-hfc_female-medium" });
+await tts.initialize(); // instant — model already cached
+```
+
+---
+
+## Browser Compatibility Check
+
+Gate your UI before attempting to start STT or TTS:
+
+```ts
+import { getCompatibilityInfo } from "speech-to-speech";
+
+const { stt, tts, browser } = getCompatibilityInfo();
+
+if (!stt) {
+  showBanner(`Speech input is not supported in ${browser}. Please use Chrome or Edge.`);
+}
+if (!tts) {
+  showBanner("Text-to-speech is not supported in this browser.");
+}
+```
+
+---
+
+## Text Cleanup for TTS
+
+Strip HTML, Markdown, and emoji from LLM responses before passing them to synthesis:
+
+```ts
+import { cleanTextForTTS } from "speech-to-speech";
+
+const raw = "**Hello** <b>world</b>! Here's a [link](https://example.com) 🎉";
+const spoken = cleanTextForTTS(raw);
+// → "Hello world Here's a link"
+
+// Or opt-out of individual steps:
+const spoken2 = cleanTextForTTS(raw, { removeEmojis: false });
+// → "Hello world Here's a link 🎉"
+```
+
+---
+
+## Audio Player Status Callbacks
+
+React to playback state changes without polling:
+
+```ts
+import { sharedAudioPlayer } from "speech-to-speech";
+
+sharedAudioPlayer.setStatusCallback((status) => {
+  console.log("[TTS]", status); // e.g. "Playing audio chunk 1"
+});
+
+sharedAudioPlayer.setPlayingChangeCallback((isPlaying) => {
+  setTTSIndicator(isPlaying); // show/hide a speaking indicator in UI
+});
+```
+
+---
+
 ## Available Piper Voices
 
-Voice models are downloaded automatically from CDN on first use (~20-80MB per voice).
+Voice models are downloaded automatically from CDN on first use (~20-80MB per voice). WASM files (~9MB) are cached automatically and reused across all voices.
 
 | Voice ID                  | Language     | Description                    |
 | ------------------------- | ------------ | ------------------------------ |
@@ -602,7 +794,8 @@ See [Piper Voices](https://rhasspy.github.io/piper-samples/) for the complete li
 | Issue                | Solution                                                                                |
 | -------------------- | --------------------------------------------------------------------------------------- |
 | "Voice not found"    | Check voice ID spelling. Use `en_US-hfc_female-medium` for testing.                     |
-| Slow first synthesis | Normal - voice model (~20MB) downloads on first use. Subsequent calls use cached model. |
+| Slow first synthesis | Normal - voice model (~20MB) and WASM files (~9MB) download on first use. Subsequent calls use cached assets. |
+| Repeated WASM downloads | Ensure `enableWasmCache: true` (default). Check browser Cache API support. |
 | No audio output      | Ensure browser supports Web Audio API. Check volume and audio permissions.              |
 | CORS errors          | Ensure Vite config has proper COOP/COEP headers (see above).                            |
 
@@ -646,6 +839,25 @@ npm run clean   # Remove dist/
 - **[@realtimex/piper-tts-web](https://github.com/synesthesiam/piper)** - Browser wrapper for Piper
 - **[Web Speech API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Speech_API)** - Browser speech recognition
 - **[Web Audio API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API)** - Audio processing
+
+## Changelog
+
+### v0.1.4
+
+- **`createSpeechService()`** — Unified service wrapper that wires STT + TTS together with a single ergonomic API. Supports `initializeSTT`, `initializeTTS`, `startListening`, `stopListening`, `speak`, `stopSpeaking`, and `getCompatibilityInfo`.
+- **`onInterimTranscript`** — New option in `STTLogic` (and `createSpeechService().initializeSTT()`) to receive real-time partial transcript updates while the user is still speaking.
+- **`prefetchTTSModel(voiceId)`** — Pre-warm a Piper voice early in app boot to eliminate cold-start latency on the first `speak()` call.
+- **`getCompatibilityInfo()`** — Returns `{ stt, tts, browser }` for browser feature detection and UI gating.
+- **`cleanTextForTTS(text, options?)`** — Strips HTML, Markdown, and emoji from text before synthesis. Options: `stripHtml`, `stripMarkdown`, `removeEmojis` (all default `true`).
+
+### v0.1.3
+
+- Automatic WASM caching via the browser Cache API — `piper_phonemize.data` (~9MB) and `piper_phonemize.wasm` are fetched once and reused across sessions.
+- `ensureWasmCached`, `isWasmCached`, `clearWasmCache` utility functions.
+- `enableWasmCache` and `wasmPaths` options on `TTSLogic` for self-hosted WASM.
+- Speech-aware audio player — queue automatically pauses while the user is speaking.
+
+---
 
 ## License
 

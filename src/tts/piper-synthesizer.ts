@@ -323,3 +323,106 @@ export function textToPhonemes(_text: string): number[] {
   );
   return [];
 }
+
+// ==========================================================================
+// Text cleanup helper
+// ==========================================================================
+
+export interface CleanTextOptions {
+  /** Strip HTML tags (default: true) */
+  stripHtml?: boolean;
+  /** Strip common Markdown syntax (default: true) */
+  stripMarkdown?: boolean;
+  /** Remove emoji characters (default: true) */
+  removeEmojis?: boolean;
+}
+
+/**
+ * Clean arbitrary text before passing it to TTS synthesis.
+ * Removes HTML, Markdown formatting, and emoji characters that would
+ * otherwise be spoken literally or cause unexpected output.
+ *
+ * All options default to `true`; pass `false` to disable individual steps.
+ *
+ * @example
+ * const spoken = cleanTextForTTS("**Hello** <b>world</b> 🎉");
+ * // → "Hello world"
+ */
+export function cleanTextForTTS(
+  text: string,
+  options: CleanTextOptions = {}
+): string {
+  const {
+    stripHtml = true,
+    stripMarkdown = true,
+    removeEmojis = true,
+  } = options;
+
+  let output = text || "";
+
+  if (stripHtml) {
+    output = output.replace(/<[^>]*>/g, " ");
+  }
+
+  if (stripMarkdown) {
+    // Unwrap [label](url) → label
+    output = output.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+    // Remove common Markdown punctuation characters
+    output = output.replace(/[#*_`~>]/g, " ");
+    // Collapse repeated whitespace
+    output = output.replace(/\s+/g, " ");
+  }
+
+  if (removeEmojis) {
+    output = output
+      .replace(
+        /[\p{Emoji_Presentation}\p{Extended_Pictographic}\u200d\ufe0f]/gu,
+        ""
+      )
+      .replace(/\s+/g, " ");
+  }
+
+  return output.trim();
+}
+
+// ==========================================================================
+// TTS Warmup / Prefetch helper
+// ==========================================================================
+
+const _prefetchCache = new Map<string, Promise<boolean>>();
+
+/**
+ * Pre-warm a Piper TTS voice so the first `synthesize()` call in user code
+ * has minimal latency. Safe to call multiple times — subsequent calls for
+ * the same `voiceId` return the cached promise immediately.
+ *
+ * @param voiceId - Voice ID to warm up (e.g. `"en_US-hfc_female-medium"`)
+ * @returns `true` on success, `false` if warmup failed (error is logged)
+ *
+ * @example
+ * // Call early in your app boot, before the user interacts
+ * prefetchTTSModel("en_US-hfc_female-medium");
+ */
+export function prefetchTTSModel(voiceId: string): Promise<boolean> {
+  if (!voiceId) return Promise.resolve(false);
+  if (_prefetchCache.has(voiceId)) return _prefetchCache.get(voiceId)!;
+
+  const task = (async () => {
+    try {
+      const tts = new TTSLogic({ voiceId, warmUp: true, useSharedAudioPlayer: false });
+      await tts.initialize();
+      await tts.dispose();
+      console.log(`[speech-to-speech] TTS prefetch complete for "${voiceId}"`);
+      return true;
+    } catch (error) {
+      console.error(
+        `[speech-to-speech] TTS prefetch failed for "${voiceId}":`,
+        error
+      );
+      return false;
+    }
+  })();
+
+  _prefetchCache.set(voiceId, task);
+  return task;
+}

@@ -18,3 +18,10 @@
 
 export * from "./stt/index.js";
 export * from "./tts/index.js";
+
+export { createSpeechService } from "./internal/speech-service.js";
+export type {
+  SpeechService,
+  SpeechServiceSTTOptions,
+  SpeechServiceTTSOptions,
+} from "./internal/speech-service.js";
