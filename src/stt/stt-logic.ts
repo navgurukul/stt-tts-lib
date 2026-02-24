@@ -142,6 +142,10 @@ export class ResetSTTLogic {
   private onUserSpeechStart?: () => void;
   private onUserSpeechEnd?: () => void;
   private fillerManager: FillerManager | null = null;
+  private isMobile: boolean = false;
+  private speechEndHandler?: (e?: Event) => void;
+  private audioEndHandler?: (e?: Event) => void;
+  private lastSpeechEndTime: number = 0;
 
   constructor(
     onLog: LogCallback,
@@ -196,6 +200,10 @@ export class ResetSTTLogic {
     }
 
     this.recognition = new SpeechRecognitionAPI();
+    this.isMobile = this.detectMobile();
+    if (this.isMobile) {
+      this.sessionDuration = Math.min(this.sessionDuration, 10000);
+    }
     this.setupRecognition();
   }
 
@@ -248,6 +256,37 @@ export class ResetSTTLogic {
     this.heardWords = [];
   }
 
+  /**
+   * Detect if running on a mobile device.
+   * More accurate detection that avoids false positives on laptops with touchscreens.
+   */
+  private detectMobile(): boolean {
+    const userAgent =
+      navigator.userAgent || navigator.vendor || (window as any).opera;
+    const ua = userAgent.toLowerCase();
+
+    // Check for explicit mobile patterns in user agent
+    const isMobileUA =
+      /android|webos|iphone|ipod|blackberry|iemobile|opera mini/i.test(ua);
+
+    // iPad detection (iPadOS 13+ reports as Mac in UA, but has touch)
+    const isIPad =
+      /ipad/i.test(ua) ||
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
+    // Exclude desktop browsers that happen to have touch (Windows laptops, MacBooks with touch bar)
+    const isDesktopWithTouch =
+      /windows nt|macintosh|mac os x/i.test(ua) && !isMobileUA && !isIPad;
+
+    const result = (isMobileUA || isIPad) && !isDesktopWithTouch;
+
+    console.log(
+      `[ResetSTTLogic] Mobile detection: ${result} (UA: ${ua.substring(0, 50)}...)`
+    );
+
+    return result;
+  }
+
   private setupRecognition(): void {
     this.recognition.lang = "en-US";
     this.recognition.interimResults = true;
@@ -256,10 +295,45 @@ export class ResetSTTLogic {
 
     this.resultHandler = (event: Event) => {
       const speechEvent = event as SpeechRecognitionEvent;
+
+      // Build complete transcript more carefully to avoid duplicates
       let completeTranscript = "";
+      const finalizedParts: string[] = [];
+      let currentInterim = "";
+
       for (let i = 0; i < speechEvent.results.length; i++) {
-        completeTranscript += speechEvent.results[i][0].transcript + " ";
+        const result = speechEvent.results[i];
+        const transcript = result[0].transcript.trim();
+
+        if (result.isFinal) {
+          // For final results, add to finalized parts (avoiding duplicates)
+          if (
+            transcript.length > 0 &&
+            !this.isDuplicateOfPrevious(finalizedParts, transcript)
+          ) {
+            finalizedParts.push(transcript);
+          }
+        } else {
+          // For interim results, only keep the last one (most complete)
+          currentInterim = transcript;
+        }
       }
+
+      // Combine finalized parts
+      completeTranscript = finalizedParts.join(" ");
+
+      // Add interim if present and not duplicate of finalized content
+      if (currentInterim.length > 0) {
+        if (completeTranscript.length > 0) {
+          const suffix = this.getSuffixToAppend(completeTranscript, currentInterim);
+          if (suffix.length > 0) {
+            completeTranscript = completeTranscript + " " + suffix;
+          }
+        } else {
+          completeTranscript = currentInterim;
+        }
+      }
+
       completeTranscript = completeTranscript.trim();
 
       const isFinal =
@@ -317,20 +391,20 @@ export class ResetSTTLogic {
           this.onUserSpeechEnd?.();
         } catch {}
 
-        this.fullTranscript = (
-          this.sessionStartTranscript +
-          " " +
+        const suffix = this.getSuffixToAppend(
+          this.fullTranscript,
           completeTranscript
-        ).trim();
-        this.fullTranscript = this.collapseRepeats(this.fullTranscript);
-
-        this.heardWords = this.fullTranscript
-          .split(/\s+/)
-          .filter((word) => word.length > 0);
-
-        this.onTranscript(this.getFullTranscript());
-        this.lastSavedLength = this.fullTranscript.length;
-        if (this.onWordsUpdate) this.onWordsUpdate(this.heardWords);
+        );
+        if (suffix.length > 0) {
+          this.fullTranscript = (this.fullTranscript + " " + suffix).trim();
+          this.fullTranscript = this.collapseRepeats(this.fullTranscript);
+          this.heardWords = this.fullTranscript
+            .split(/\s+/)
+            .filter((word) => word.length > 0);
+          this.onTranscript(this.fullTranscript);
+          this.lastSavedLength = this.fullTranscript.length;
+          if (this.onWordsUpdate) this.onWordsUpdate(this.heardWords);
+        }
 
         this.lastInterimTranscript = "";
 
@@ -341,10 +415,6 @@ export class ResetSTTLogic {
             !this.restartMetrics[rid].firstResultAt
           ) {
             this.restartMetrics[rid].firstResultAt = Date.now();
-            const startedAt =
-              this.restartMetrics[rid].startedAt ||
-              this.restartMetrics[rid].startAttemptAt ||
-              Date.now();
             const firstResultDelta =
               this.restartMetrics[rid].firstResultAt -
               this.restartMetrics[rid].requestedAt;
@@ -398,22 +468,59 @@ export class ResetSTTLogic {
 
     this.endHandler = () => {
       this.isRecognitionRunning = false;
+
+      const timeSinceLastResult = Date.now() - this.lastInterimResultTime;
+      const hadRecentSpeech = timeSinceLastResult < 2000; // Had speech within last 2s
+
+      console.log(
+        `[ResetSTTLogic] Recognition ended. isListening: ${this.isListening}, ` +
+        `isRestarting: ${this.isRestarting}, isMobile: ${this.isMobile}, ` +
+        `timeSinceLastResult: ${timeSinceLastResult}ms`
+      );
+
       if (this.isListening && !this.isRestarting) {
-        setTimeout(() => {
-          if (this.isListening && !this.isRestarting) {
-            try {
-              this.recognition.start();
-              this.isRecognitionRunning = true;
-              this.sessionId++;
-              this.onLog(
-                `🔁 Auto-resumed recognition after end (session ${this.sessionId})`,
-                "info"
-              );
-            } catch (e) {
-              this.onLog(`Failed to auto-start after end: ${e}`, "error");
+        // Save any pending interim transcript before restart
+        if (this.lastInterimTranscript.trim().length > 0) {
+          this.saveInterimToFinal();
+        }
+
+        // On mobile, be conservative with restarts to avoid loops.
+        // Only restart if we had recent speech OR it's been a while since last result.
+        const shouldRestart = this.isMobile
+          ? hadRecentSpeech || timeSinceLastResult > 3000
+          : true; // Desktop: always restart quickly
+
+        if (shouldRestart) {
+          const restartDelay = this.isMobile ? 300 : 100;
+          setTimeout(() => {
+            if (
+              this.isListening &&
+              !this.isRestarting &&
+              !this.isRecognitionRunning
+            ) {
+              try {
+                this.recognition.start();
+                this.isRecognitionRunning = true;
+                this.sessionId++;
+                console.log(
+                  `[ResetSTTLogic] Recognition restarted (session ${this.sessionId}, ` +
+                  `timeSinceLastResult: ${timeSinceLastResult}ms, mobile: ${this.isMobile})`
+                );
+                this.onLog(
+                  `🔁 Auto-resumed recognition after end (session ${this.sessionId})`,
+                  "info"
+                );
+              } catch (e) {
+                this.onLog(`Failed to auto-start after end: ${e}`, "error");
+              }
             }
-          }
-        }, 100);
+          }, restartDelay);
+        } else {
+          console.log(
+            `[ResetSTTLogic] Mobile: Skipping restart ` +
+            `(timeSinceLastResult: ${timeSinceLastResult}ms, hadRecentSpeech: ${hadRecentSpeech})`
+          );
+        }
       }
     };
     this.recognition.addEventListener("end", this.endHandler);
@@ -435,6 +542,34 @@ export class ResetSTTLogic {
       }
     };
     this.recognition.addEventListener("start", this.startHandler);
+
+    // speechend fires when silence is detected after speech
+    this.speechEndHandler = () => {
+      this.lastSpeechEndTime = Date.now();
+      console.log(
+        `[ResetSTTLogic] Speech ended (silence detected) - mobile: ${this.isMobile}`
+      );
+    };
+    this.recognition.addEventListener("speechend", this.speechEndHandler);
+
+    // audioend fires when audio capture ends (before onend)
+    this.audioEndHandler = () => {
+      if (this.isListening && !this.isRestarting) {
+        // On mobile, be conservative - only save if we haven't saved recently
+        const timeSinceLastSave = Date.now() - this.lastInterimSaveTime;
+        const shouldSave = this.isMobile
+          ? timeSinceLastSave > 1000
+          : true;
+
+        if (shouldSave && this.lastInterimTranscript.trim().length > 0) {
+          this.saveInterimToFinal();
+          console.log(
+            `[ResetSTTLogic] Audio ended - saved interim transcript (mobile: ${this.isMobile})`
+          );
+        }
+      }
+    };
+    this.recognition.addEventListener("audioend", this.audioEndHandler);
   }
 
   private waitForEventOnce(
@@ -460,6 +595,7 @@ export class ResetSTTLogic {
     this.lastTickTime = Date.now();
     this.lastInterimSaveTime = Date.now();
 
+    // Track mic on-time every 100ms (for UI only, no forced restarts)
     this.micTimeInterval = window.setInterval(() => {
       if (this.isListening) {
         const now = Date.now();
@@ -467,14 +603,9 @@ export class ResetSTTLogic {
         this.micOnTime += elapsed;
         this.lastTickTime = now;
 
-        if (now - this.lastInterimSaveTime >= this.interimSaveInterval) {
-          this.saveInterimToFinal();
-          this.lastInterimSaveTime = now;
-        }
+        // NO forced timer-based restarts - let recognition run naturally with continuous=true
+        // Restart only via onend handler when browser stops recognition
 
-        if (this.micOnTime >= this.sessionDuration) {
-          if (!this.isRestarting) this.performRestart();
-        }
         if (this.onMicTimeUpdate) this.onMicTimeUpdate(this.micOnTime);
       }
     }, 100);
@@ -488,27 +619,63 @@ export class ResetSTTLogic {
   }
 
   private saveInterimToFinal(): void {
-    if (!this.lastInterimTranscript) return;
-    const now = Date.now();
-    if (
-      now - this.lastInterimResultTime > this.interimSaveInterval &&
-      this.lastInterimTranscript.length > this.lastSavedLength
-    ) {
-      this.fullTranscript = (
-        this.fullTranscript +
-        " " +
-        this.lastInterimTranscript
-      ).trim();
+    if (!this.lastInterimTranscript.trim()) return;
+
+    const base =
+      this.transcriptBeforeRestart.trim().length > 0
+        ? this.transcriptBeforeRestart
+        : this.fullTranscript;
+
+    const newTranscript = this.collapseRepeats(this.lastInterimTranscript.trim());
+    const suffix = this.getSuffixToAppend(base, newTranscript);
+    if (suffix.length > 0) {
+      this.fullTranscript = (base + " " + suffix).trim();
       this.fullTranscript = this.collapseRepeats(this.fullTranscript);
-      this.lastSavedLength = this.fullTranscript.length;
-      if (this.onWordsUpdate) {
-        const words = this.fullTranscript
-          .split(/\s+/)
-          .filter((w) => w.length > 0);
-        this.onWordsUpdate(words);
+      if (this.transcriptBeforeRestart.trim().length > 0) {
+        this.transcriptBeforeRestart = "";
       }
-      this.onTranscript(this.getFullTranscript());
+      this.heardWords = this.fullTranscript
+        .split(/\s+/)
+        .filter((word) => word.length > 0);
+      this.onTranscript(this.fullTranscript);
+      this.lastSavedLength = this.fullTranscript.length;
+      this.lastInterimTranscript = "";
+      this.lastInterimSaveTime = Date.now();
+      if (this.onWordsUpdate) this.onWordsUpdate(this.heardWords);
     }
+  }
+
+  /**
+   * Check if a transcript is a duplicate or subset of previous finalized parts.
+   */
+  private isDuplicateOfPrevious(parts: string[], newPart: string): boolean {
+    if (parts.length === 0) return false;
+
+    const newPartNormalized = newPart.toLowerCase().trim();
+
+    for (const part of parts) {
+      const partNormalized = part.toLowerCase().trim();
+      // Exact match
+      if (partNormalized === newPartNormalized) return true;
+      // New part is contained in existing part
+      if (partNormalized.includes(newPartNormalized)) return true;
+    }
+
+    // Check if new part is contained in the combined previous parts
+    const combined = parts.join(" ").toLowerCase().trim();
+    if (combined.includes(newPartNormalized)) return true;
+
+    // Check for high word overlap (>80% of words already present)
+    const newWords = newPartNormalized.split(/\s+/).filter((w) => w.length > 0);
+    const combinedWords = new Set(
+      combined.split(/\s+/).filter((w) => w.length > 0)
+    );
+    if (newWords.length > 0) {
+      const overlapCount = newWords.filter((w) => combinedWords.has(w)).length;
+      if (overlapCount / newWords.length > 0.8) return true;
+    }
+
+    return false;
   }
 
   private getSuffixToAppend(base: string, current: string): string {
@@ -531,28 +698,34 @@ export class ResetSTTLogic {
   private collapseRepeats(text: string): string {
     if (!text || text.trim().length === 0) return text.trim();
     let normalized = text.replace(/\s+/g, " ").trim();
+
+    // 0) Handle sentence-level repetition first
+    normalized = this.collapseSentenceRepeats(normalized);
+
+    // 1) If the full text is a repeated substring (e.g., 'A A' or 'A A A'), collapse to single A
     const n = normalized.length;
-    const lps: number[] = new Array(n).fill(0);
-    for (let i = 1; i < n; i++) {
-      let j = lps[i - 1];
-      while (j > 0 && normalized[i] !== normalized[j]) j = lps[j - 1];
-      if (normalized[i] === normalized[j]) j++;
-      lps[i] = j;
+    if (n > 0) {
+      const lps: number[] = new Array(n).fill(0);
+      for (let i = 1; i < n; i++) {
+        let j = lps[i - 1];
+        while (j > 0 && normalized[i] !== normalized[j]) j = lps[j - 1];
+        if (normalized[i] === normalized[j]) j++;
+        lps[i] = j;
+      }
+      const period = n - lps[n - 1];
+      if (period < n && n % period === 0) {
+        normalized = normalized.slice(0, period).trim();
+      }
     }
-    const period = n - lps[n - 1];
-    if (period < n && n % period === 0) {
-      return normalized.slice(0, period).trim();
-    }
-    const words = normalized.split(" ");
-    for (
-      let block = Math.min(20, Math.floor(words.length / 2));
-      block >= 1;
-      block--
-    ) {
+
+    // 2) Collapse adjacent repeated word blocks (case-insensitive, up to 30 words)
+    const words = normalized.split(" ").filter((w) => w.length > 0);
+    const maxBlockSize = Math.min(30, Math.floor(words.length / 2));
+    for (let block = maxBlockSize; block >= 1; block--) {
       let i = 0;
       while (i + 2 * block <= words.length) {
-        let blockA = words.slice(i, i + block).join(" ");
-        let blockB = words.slice(i + block, i + 2 * block).join(" ");
+        const blockA = words.slice(i, i + block).join(" ").toLowerCase();
+        const blockB = words.slice(i + block, i + 2 * block).join(" ").toLowerCase();
         if (blockA === blockB) {
           words.splice(i + block, block);
         } else {
@@ -560,15 +733,62 @@ export class ResetSTTLogic {
         }
       }
     }
+
+    // 3) Collapse adjacent identical words (case-insensitive, preserve first occurrence's case)
     const collapsedWords: string[] = [];
     for (const w of words) {
       if (
         collapsedWords.length === 0 ||
-        collapsedWords[collapsedWords.length - 1] !== w
-      )
+        collapsedWords[collapsedWords.length - 1].toLowerCase() !== w.toLowerCase()
+      ) {
         collapsedWords.push(w);
+      }
     }
     return collapsedWords.join(" ").trim();
+  }
+
+  /**
+   * Collapse sentence-level repetitions.
+   * Handles cases like "Hello world. Hello world." or "Hello world hello world".
+   */
+  private collapseSentenceRepeats(text: string): string {
+    if (!text || text.length < 10) return text;
+
+    const words = text.split(/\s+/).filter((w) => w.length > 0);
+    if (words.length < 4) return text;
+
+    const halfLen = Math.floor(words.length / 2);
+    const firstHalf = words
+      .slice(0, halfLen)
+      .join(" ")
+      .toLowerCase()
+      .replace(/[.,!?]/g, "");
+    const secondHalf = words
+      .slice(halfLen, halfLen * 2)
+      .join(" ")
+      .toLowerCase()
+      .replace(/[.,!?]/g, "");
+
+    if (firstHalf === secondHalf) {
+      const remainder = words.slice(halfLen * 2);
+      return [...words.slice(0, halfLen), ...remainder].join(" ");
+    }
+
+    // Check for near-duplicate (>90% word similarity)
+    const firstWords = firstHalf.split(/\s+/);
+    const secondWords = secondHalf.split(/\s+/);
+    if (firstWords.length === secondWords.length && firstWords.length > 3) {
+      let matchCount = 0;
+      for (let i = 0; i < firstWords.length; i++) {
+        if (firstWords[i] === secondWords[i]) matchCount++;
+      }
+      if (matchCount / firstWords.length > 0.9) {
+        const remainder = words.slice(halfLen * 2);
+        return [...words.slice(0, halfLen), ...remainder].join(" ");
+      }
+    }
+
+    return text;
   }
 
   private performRestart(): void {
@@ -714,7 +934,7 @@ export class ResetSTTLogic {
       }
       this.startMicTimer();
       this.onLog(
-        "Listening started (auto-restart every 30s of mic time)",
+        "Listening started (continuous mode with auto-resume on end)",
         "info"
       );
     } catch (error) {
@@ -770,6 +990,16 @@ export class ResetSTTLogic {
         this.recognition.removeEventListener(
           "start",
           this.startHandler as EventListener
+        );
+      if (this.speechEndHandler)
+        this.recognition.removeEventListener(
+          "speechend",
+          this.speechEndHandler as EventListener
+        );
+      if (this.audioEndHandler)
+        this.recognition.removeEventListener(
+          "audioend",
+          this.audioEndHandler as EventListener
         );
     } catch (e) {}
   }

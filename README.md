@@ -842,6 +842,17 @@ npm run clean   # Remove dist/
 
 ## Changelog
 
+### v1.0.5
+
+**Key STT Improvements:**
+
+- ✅ **Mobile-optimized restart behavior** — Automatic mobile device detection with conservative restart logic to prevent speech recognition loops on mobile browsers. Desktop gets immediate restarts, mobile waits for recent speech activity.
+- ✅ **No mid-sentence forced restarts** — Uses browser-native `continuous: true` mode with event-based restart instead of timer-based interruptions. Recognition only restarts when the browser fires the `end` event (silence detection, no-speech, etc.), allowing natural conversation flow.
+- ✅ **Advanced duplicate detection** — Enhanced `collapseRepeats()` and `collapseSentenceRepeats()` methods prevent repeated words, blocks, and full sentences in transcripts. Includes 80% word overlap detection for near-duplicates.
+- ✅ **Event-driven restart system** — Intelligent restart logic in `endHandler` evaluates `timeSinceLastResult` and `hadRecentSpeech` to decide whether to restart, with separate delays for mobile (300ms) vs desktop (100ms).
+- ✅ **Natural conversation flow** — Speech end detection triggers user callbacks, syncs with internal speech state for TTS coordination, and saves interim transcripts before restarts.
+
+
 ### v0.1.4
 
 - **`createSpeechService()`** — Unified service wrapper that wires STT + TTS together with a single ergonomic API. Supports `initializeSTT`, `initializeTTS`, `startListening`, `stopListening`, `speak`, `stopSpeaking`, and `getCompatibilityInfo`.

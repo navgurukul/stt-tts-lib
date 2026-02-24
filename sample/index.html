@@ -3,69 +3,238 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>STT Demo</title>
+  <title>STT Demo – Mobile & Dedup Test</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 2rem; }
-    button { margin-right: 0.5rem; padding: 0.6rem 1rem; }
-    #log { margin-top: 1rem; padding: 1rem; border: 1px solid #ddd; min-height: 150px; white-space: pre-wrap; }
-    #transcript { margin-top: 1rem; padding: 1rem; border: 1px solid #ddd; min-height: 80px; white-space: pre-wrap; }
+    * { box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; margin: 1rem; background: #f5f5f5; }
+    h1 { margin-bottom: 0.25rem; }
+    p.hint { color: #666; font-size: 0.9rem; margin-top: 0; }
+
+    .row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+    button {
+      padding: 0.6rem 1.2rem; border: none; border-radius: 6px;
+      cursor: pointer; font-size: 0.95rem;
+    }
+    #startBtn  { background: #22c55e; color: #fff; }
+    #stopBtn   { background: #ef4444; color: #fff; }
+    #clearBtn  { background: #6b7280; color: #fff; }
+
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+    @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } }
+
+    .card {
+      background: #fff; border-radius: 8px; padding: 0.75rem 1rem;
+      border: 1px solid #e5e7eb;
+    }
+    .card h3 { margin: 0 0 0.4rem; font-size: 0.85rem; color: #6b7280; text-transform: uppercase; }
+
+    #interimEl {
+      min-height: 40px; color: #9333ea; font-style: italic;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    #transcriptEl {
+      min-height: 60px; font-size: 1.05rem;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    #statsEl { font-size: 0.85rem; line-height: 1.8; }
+    #log {
+      min-height: 160px; max-height: 320px; overflow-y: auto;
+      font-size: 0.78rem; white-space: pre-wrap; word-break: break-word;
+      font-family: monospace; line-height: 1.4;
+    }
+    .tag {
+      display: inline-block; padding: 0.15rem 0.45rem; border-radius: 4px;
+      font-size: 0.75rem; font-weight: bold; margin-left: 0.3rem;
+    }
+    .tag-mobile   { background: #fef3c7; color: #92400e; }
+    .tag-desktop  { background: #dbeafe; color: #1e3a8a; }
+    .tag-info     { color: #2563eb; }
+    .tag-warning  { color: #d97706; }
+    .tag-error    { color: #dc2626; }
   </style>
 </head>
 <body>
-  <h1>STT Demo</h1>
-  <p>Runs in the browser using the Web Speech API. Use Chrome, allow microphone access, and serve over HTTPS or localhost.</p>
-  <div>
-    <button id="startBtn">Start Listening</button>
-    <button id="stopBtn">Stop Listening</button>
+  <h1>STT Demo <span id="deviceTag"></span></h1>
+  <p class="hint">
+    Tests: mobile detection · conservative restart logic · speechend / audioend events ·
+    transcript deduplication · collapseSentenceRepeats.
+    Use Chrome / Edge, allow microphone, serve via HTTPS or localhost.
+  </p>
+
+  <div class="row">
+    <button id="startBtn">▶ Start Listening</button>
+    <button id="stopBtn">■ Stop</button>
+    <button id="clearBtn">⌫ Clear</button>
   </div>
-  <div id="transcript" aria-live="polite"></div>
-  <div id="log"></div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Interim (live)</h3>
+      <div id="interimEl">—</div>
+    </div>
+    <div class="card">
+      <h3>Final Transcript</h3>
+      <div id="transcriptEl">—</div>
+    </div>
+    <div class="card">
+      <h3>Stats</h3>
+      <div id="statsEl">—</div>
+    </div>
+    <div class="card">
+      <h3>Event Log</h3>
+      <div id="log"></div>
+    </div>
+  </div>
 
   <script type="module">
-    // Assumes you built the library: npm install && npm run build
     import { STTLogic } from '../dist/stt/index.mjs';
 
-    const logEl = document.getElementById('log');
-    const transcriptEl = document.getElementById('transcript');
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn = document.getElementById('stopBtn');
+    const interimEl    = document.getElementById('interimEl');
+    const transcriptEl = document.getElementById('transcriptEl');
+    const statsEl      = document.getElementById('statsEl');
+    const logEl        = document.getElementById('log');
+    const deviceTag    = document.getElementById('deviceTag');
+    const startBtn     = document.getElementById('startBtn');
+    const stopBtn      = document.getElementById('stopBtn');
+    const clearBtn     = document.getElementById('clearBtn');
 
-    const log = (msg) => {
-      const ts = new Date().toISOString();
-      logEl.textContent += `[${ts}] ${msg}\n`;
+    let micMs = 0;
+    let restartCount = 0;
+    let lastRestartMs = null;
+    let speechEndCount = 0;
+    let audioEndCount = 0;
+
+    // ── helpers ────────────────────────────────────────────────────────────
+    function log(msg, type = 'info') {
+      const ts = new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const line = document.createElement('div');
+      line.innerHTML = `<span style="color:#9ca3af">[${ts}]</span> <span class="tag-${type}">${msg}</span>`;
+      logEl.appendChild(line);
       logEl.scrollTop = logEl.scrollHeight;
-    };
+    }
 
+    function updateStats() {
+      statsEl.innerHTML = [
+        `<b>Mic time:</b> ${(micMs / 1000).toFixed(1)}s`,
+        `<b>Restarts:</b> ${restartCount}${lastRestartMs != null ? ` (last: ${lastRestartMs}ms)` : ''}`,
+        `<b>speechend events:</b> ${speechEndCount}`,
+        `<b>audioend events:</b> ${audioEndCount}`,
+        `<b>Session duration:</b> ${stt ? stt.getSessionDurationMs() + 'ms' : '—'}`,
+        `<b>Auto-restarting:</b> ${stt ? stt.isInAutoRestart() : '—'}`,
+      ].join('<br>');
+    }
+
+    // ── init ───────────────────────────────────────────────────────────────
     let stt;
     try {
       stt = new STTLogic(
-        (message, type = 'info') => log(`[${type}] ${message}`),
+        (message, type = 'info') => log(message, type),
         (text) => {
-          transcriptEl.textContent = text;
+          transcriptEl.textContent = text || '—';
+          updateStats();
         },
-        { sessionDurationMs: 30000, interimSaveIntervalMs: 1000 }
+        {
+          sessionDurationMs: 30000,
+          interimSaveIntervalMs: 5000,
+          onInterimTranscript: (text) => {
+            interimEl.textContent = text || '—';
+          },
+        }
       );
+
+      // mic time
+      stt.setMicTimeUpdateCallback((ms) => {
+        micMs = ms;
+        updateStats();
+      });
+
+      // restart metrics
+      stt.setRestartMetricsCallback((count, lastDur) => {
+        restartCount = count;
+        lastRestartMs = lastDur;
+        log(`🔄 Restart #${count} completed (duration: ${lastDur != null ? lastDur + 'ms' : 'n/a'})`, 'warning');
+        updateStats();
+      });
+
+      // VAD callbacks (speech start/end fired via internal state)
+      stt.setVadCallbacks(
+        () => log('🎙️ Speech start detected', 'info'),
+        () => { log('🤫 Speech end detected', 'info'); speechEndCount++; updateStats(); }
+      );
+
+      // Show mobile tag after init (detectMobile runs in constructor)
+      const sessionMs = stt.getSessionDurationMs();
+      const isMobile = sessionMs <= 10000;   // heuristic: capped to 10s = mobile was detected
+      deviceTag.innerHTML = isMobile
+        ? '<span class="tag tag-mobile">📱 Mobile</span>'
+        : '<span class="tag tag-desktop">🖥 Desktop</span>';
+
+      log(`STT initialised. sessionDuration=${sessionMs}ms`, 'info');
+
     } catch (err) {
-      log(`Failed to init STT: ${err}`);
+      log(`Failed to init STT: ${err}`, 'error');
     }
 
+    // ── patch recognition to count audioend / speechend ───────────────────
+    // We intercept the underlying browser events via console (detectMobile logs them)
+    const _origLog = console.log.bind(console);
+    console.log = (...args) => {
+      _origLog(...args);
+      const msg = args.join(' ');
+      if (msg.includes('Speech ended (silence detected)')) {
+        speechEndCount++;
+        log('🔇 speechend – silence detected', 'warning');
+        updateStats();
+      } else if (msg.includes('Audio ended')) {
+        audioEndCount++;
+        log('🔈 audioend – audio capture stopped', 'warning');
+        updateStats();
+      } else if (msg.includes('Recognition ended')) {
+        log(`⏹ Recognition ended → ${msg.split('timeSinceLastResult:')[1]?.split(')')[0]?.trim() ?? ''}`, 'warning');
+      } else if (msg.includes('Recognition restarted')) {
+        log(`▶ Recognition restarted (${msg.match(/session \d+/)?.[0] ?? ''})`, 'info');
+      } else if (msg.includes('Skipping restart')) {
+        log(`⏭ Mobile: skipped restart`, 'warning');
+      } else if (msg.includes('Mobile detection')) {
+        log(msg, 'info');
+      }
+    };
+
+    // ── buttons ─────────────────────────────────────────────────────────────
     startBtn.addEventListener('click', () => {
       try {
         stt?.start();
-        log('Listening started');
-      } catch (err) {
-        log(`Start error: ${err}`);
-      }
+        micMs = 0; restartCount = 0; lastRestartMs = null;
+        speechEndCount = 0; audioEndCount = 0;
+        interimEl.textContent = '—';
+        transcriptEl.textContent = '—';
+        updateStats();
+        log('▶ Listening started', 'info');
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+      } catch (err) { log(`Start error: ${err}`, 'error'); }
     });
 
     stopBtn.addEventListener('click', () => {
       try {
         stt?.stop();
-        log('Listening stopped');
-      } catch (err) {
-        log(`Stop error: ${err}`);
-      }
+        log('■ Listening stopped', 'info');
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        updateStats();
+      } catch (err) { log(`Stop error: ${err}`, 'error'); }
     });
+
+    clearBtn.addEventListener('click', () => {
+      stt?.clearTranscript();
+      transcriptEl.textContent = '—';
+      interimEl.textContent = '—';
+      logEl.innerHTML = '';
+      log('Transcript cleared', 'info');
+    });
+
+    stopBtn.disabled = true;
+    updateStats();
   </script>
 </body>
 </html>
