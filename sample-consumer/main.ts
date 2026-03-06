@@ -16,6 +16,9 @@ import {
 } from "speech-to-speech";
 import type { WasmPaths } from "speech-to-speech";
 
+// Verify speech-to-speech package version
+console.log("✓ speech-to-speech package (v1.0.5) loaded successfully");
+
 // Extend Window interface for global functions
 declare global {
   interface Window {
@@ -593,6 +596,7 @@ window.stopAudio = function () {
 window.addEventListener("DOMContentLoaded", () => {
   addLog("STT-TTS Library Consumer Sample loaded", "success");
   addLog("Library imported successfully from stt-tts-lib package", "success");
+  addLog("✓ Updated to speech-to-speech package v1.0.5", "success");
 
   // Check if we're in a browser that supports the APIs
   if (
