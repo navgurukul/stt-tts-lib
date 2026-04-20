@@ -64,9 +64,9 @@ function clearLog() {
 }
 
 function getWasmBaseUrlFromUi(): string | undefined {
-  const input = document.getElementById("wasmBaseUrl") as
-    | HTMLInputElement
-    | null;
+  const input = document.getElementById(
+    "wasmBaseUrl",
+  ) as HTMLInputElement | null;
   const baseUrl = input?.value?.trim() ?? "";
   return baseUrl.length > 0 ? baseUrl : undefined;
 }
@@ -75,15 +75,15 @@ function getWasmConfigFromUi(): {
   wasmPaths?: WasmPaths;
   enableWasmCache?: boolean;
 } {
-  const enableCacheEl = document.getElementById("enableWasmCache") as
-    | HTMLInputElement
-    | null;
+  const enableCacheEl = document.getElementById(
+    "enableWasmCache",
+  ) as HTMLInputElement | null;
   const enableWasmCache = enableCacheEl?.checked ?? true;
 
   const baseUrl = getWasmBaseUrlFromUi();
-  const onnxInput = document.getElementById("onnxWasmUrl") as
-    | HTMLInputElement
-    | null;
+  const onnxInput = document.getElementById(
+    "onnxWasmUrl",
+  ) as HTMLInputElement | null;
   const onnxWasm = onnxInput?.value?.trim() ?? "";
 
   if (!baseUrl) {
@@ -116,7 +116,7 @@ window.prefetchWasmCache = async function () {
       baseUrl
         ? `Prefetching WASM assets from ${baseUrl}...`
         : "Prefetching WASM assets from the default CDN...",
-      "info"
+      "info",
     );
 
     await ensureWasmCached(baseUrl);
@@ -146,16 +146,16 @@ window.startSTT = async function () {
         // onTranscript callback
         (transcript: string) => {
           const el = document.getElementById(
-            "transcript"
+            "transcript",
           ) as HTMLTextAreaElement | null;
           if (el) el.value = transcript;
         },
         // options
         {
-          sessionDurationMs: 30000, // 30 seconds per session
-          interimSaveIntervalMs: 5000,
+          continueOnSilence: true,
+          silenceThresholdMs: 5000,
           preserveTranscriptOnStart: false,
-        }
+        },
       );
 
       // Hook word updates to display heard words
@@ -166,7 +166,7 @@ window.startSTT = async function () {
           wordsDiv.innerHTML = heardWords
             .map(
               (w) =>
-                `<span style="padding: 4px 8px; margin: 2px; background: #e3f2fd; border-radius: 4px; display: inline-block;">${w}</span>`
+                `<span style="padding: 4px 8px; margin: 2px; background: #e3f2fd; border-radius: 4px; display: inline-block;">${w}</span>`,
             )
             .join(" ");
         } else {
@@ -208,7 +208,7 @@ window.stopSTT = function () {
 
 function updateStsStatus(
   message: string,
-  type: "info" | "success" | "error" = "info"
+  type: "info" | "success" | "error" = "info",
 ) {
   const statusEl = document.getElementById("stsStatus");
   if (statusEl) {
@@ -293,7 +293,7 @@ async function processSpeechToSpeech(transcript: string): Promise<void> {
 
     // Update UI
     const responseEl = document.getElementById(
-      "stsAiResponse"
+      "stsAiResponse",
     ) as HTMLTextAreaElement;
     if (responseEl) responseEl.value = aiResponse;
 
@@ -334,7 +334,7 @@ window.initSTS = async function () {
     // Configure shared audio player
     sharedAudioPlayer.configure({ autoPlay: true });
     sharedAudioPlayer.setStatusCallback((status) =>
-      addLog(`[Audio] ${status}`, "info")
+      addLog(`[Audio] ${status}`, "info"),
     );
 
     // Initialize TTS
@@ -349,7 +349,7 @@ window.initSTS = async function () {
       (transcript) => {
         // Update transcript display on every update
         const transcriptEl = document.getElementById(
-          "stsUserTranscript"
+          "stsUserTranscript",
         ) as HTMLTextAreaElement;
         if (transcriptEl) transcriptEl.value = transcript;
       },
@@ -357,7 +357,7 @@ window.initSTS = async function () {
         sessionDurationMs: 60000,
         interimSaveIntervalMs: 3000,
         preserveTranscriptOnStart: false,
-      }
+      },
     );
 
     // Set callback for when user stops speaking
@@ -375,7 +375,7 @@ window.initSTS = async function () {
           // Clear transcript for next utterance after processing
           stsSTT?.clearTranscript();
         }
-      }
+      },
     );
 
     addLog("✓ STT initialized", "success");
@@ -503,7 +503,7 @@ window.synthesizeText = async function () {
     const sentences = splitIntoSentences(text);
     addLog(
       `📝 Split into ${sentences.length} sentence(s) for streaming`,
-      "info"
+      "info",
     );
 
     const startTime = performance.now();
@@ -515,9 +515,9 @@ window.synthesizeText = async function () {
       addLog(
         `🔄 Synthesizing [${i + 1}/${sentences.length}]: "${sentence.substring(
           0,
-          40
+          40,
         )}${sentence.length > 40 ? "..." : ""}"`,
-        "info"
+        "info",
       );
 
       const sentenceStart = performance.now();
@@ -528,9 +528,9 @@ window.synthesizeText = async function () {
         `✓ [${i + 1}] Synthesized ${
           result.audio.length
         } samples (${result.duration.toFixed(2)}s) in ${sentenceTime.toFixed(
-          0
+          0,
         )}ms`,
-        "success"
+        "success",
       );
 
       // Add to audio queue - autoPlay will start playback immediately
@@ -541,9 +541,9 @@ window.synthesizeText = async function () {
           const timeToFirstAudio = performance.now() - startTime;
           addLog(
             `⚡ Time to first audio: ${timeToFirstAudio.toFixed(
-              0
+              0,
             )}ms (vs waiting for full synthesis)`,
-            "success"
+            "success",
           );
           firstSentenceSynthesized = true;
         }
@@ -553,15 +553,15 @@ window.synthesizeText = async function () {
     const totalSynthTime = performance.now() - startTime;
     addLog(
       `✅ All ${sentences.length} sentences queued in ${totalSynthTime.toFixed(
-        0
+        0,
       )}ms`,
-      "success"
+      "success",
     );
     addLog(
       `📊 Queue size: ${sharedAudioPlayer?.getQueueSize() ?? 0} | Playing: ${
         sharedAudioPlayer?.isAudioPlaying() ?? false
       }`,
-      "info"
+      "info",
     );
 
     // Optionally wait for all audio to complete
@@ -570,7 +570,7 @@ window.synthesizeText = async function () {
       const totalTime = performance.now() - startTime;
       addLog(
         `🎵 All audio playback complete in ${totalTime.toFixed(0)}ms total`,
-        "success"
+        "success",
       );
     }
   } catch (error: any) {

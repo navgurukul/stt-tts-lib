@@ -300,37 +300,122 @@ import {
 
 #### `STTLogic`
 
-Main speech recognition controller with session management.
+Main speech recognition controller. Wraps the browser's Web Speech API with:
+
+- **Silent session rotation.** Chromium ends Web Speech sessions on its own (typically after ~60s). `STTLogic` detects the browser's `end` event, commits the current session into an in-memory transcript, and transparently starts a fresh session — all without notifying the consumer. `onTranscript` is never fired during a rotation.
+- **Dedup-safe transcript model.** A high-water-mark (`processedFinalCount`) ensures each `isFinal` result is ingested exactly once across rotations, eliminating the duplicate-word artifacts typical of naive `results` concatenation.
+- **Two delivery modes.** Pick when the final transcript is emitted via the `continueOnSilence` option:
+
+| `continueOnSilence` | Behaviour                                                                                                                                                      |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `true` *(default)*  | **Continuous / manual-stop.** Listening keeps running across all silent restarts until the consumer calls `stt.stop()`. `onTranscript` fires exactly once, on stop. |
+| `false`             | **Silence-triggered.** When the user has been silent for `silenceThresholdMs`, `onTranscript` fires with the final transcript and recognition auto-stops.      |
+
+In **both** modes, `onInterimTranscript` streams the live transcript (committed sessions + current-session finals + in-flight partial) continuously, including during silent rotations — so the UI never goes blank.
 
 ```typescript
 const stt = new STTLogic(
   // Log callback
   (message: string, level?: "info" | "warning" | "error") => void,
-  // Transcript callback
+  // Final transcript callback — fires ONCE (see modes above)
   (transcript: string) => void,
   // Options
   {
-    sessionDurationMs?: number,        // Session duration (default: 30000)
-    interimSaveIntervalMs?: number,    // Interim save interval (default: 5000)
-    preserveTranscriptOnStart?: boolean,
+    // --- Delivery mode (new) ---
+    continueOnSilence?: boolean,       // default: true  (manual stop). false => silence-triggered.
+    silenceThresholdMs?: number,       // default: 1500. Only used when continueOnSilence=false.
+
+    // --- Live UI streaming ---
+    onInterimTranscript?: (text: string) => void, // fires on every result, both interim & final
+
+    // --- Misc ---
+    preserveTranscriptOnStart?: boolean, // keep the previous transcript when start() is called again
+
+    // --- Deprecated (accepted for backward compat, ignored) ---
+    sessionDurationMs?: number,        // silent rotation is now browser-driven, not timer-driven
+    interimSaveIntervalMs?: number,
   }
 );
 
 // Core methods
 stt.start();                           // Start listening
-stt.stop();                            // Stop listening
+stt.stop();                            // Stop listening AND emit onTranscript
 stt.destroy();                         // Cleanup resources
-stt.getFullTranscript();               // Get accumulated transcript
-stt.clearTranscript();                 // Clear transcript
+stt.getFullTranscript();               // Live transcript: committed + current session + in-flight interim
+stt.clearTranscript();                 // Clear all accumulated transcript
 
 // Callbacks
-stt.setWordsUpdateCallback((words: string[]) => {}); // Word-by-word updates
+stt.setWordsUpdateCallback((words: string[]) => {}); // Word stream of the live transcript
 stt.setMicTimeUpdateCallback((ms: number) => {});    // Mic active time
 stt.setVadCallbacks(
-  () => console.log("Speech started"),  // onSpeechStart
-  () => console.log("Speech ended")     // onSpeechEnd
+  () => console.log("Speech started"),  // onSpeechStart (heuristic)
+  () => console.log("Speech ended")     // onSpeechEnd   (heuristic)
 );
 ```
+
+##### Mode 1 — Continuous (manual stop)
+
+Use this for long-form dictation, note-taking, or chat inputs where the user decides when they are done.
+
+```typescript
+const stt = new STTLogic(
+  (msg, level) => console.log(`[${level}]`, msg),
+  (finalText) => {
+    // Fires ONCE, when stt.stop() is called by you.
+    saveToDB(finalText);
+  },
+  {
+    continueOnSilence: true, // (default)
+    onInterimTranscript: (liveText) => {
+      // Fires continuously — render the growing text as the user speaks.
+      liveCaption.textContent = liveText;
+    },
+  },
+);
+
+stt.start();
+// ... user keeps talking for 5 minutes; Web Speech silently rotates several times ...
+stopButton.onclick = () => stt.stop(); // only here does onTranscript fire
+```
+
+##### Mode 2 — Silence-triggered auto-stop
+
+Use this for turn-taking conversational UIs (voice assistants, STS loops), where "user stopped talking" is the signal to act.
+
+```typescript
+const stt = new STTLogic(
+  (msg, level) => console.log(`[${level}]`, msg),
+  (finalText) => {
+    // Fires automatically once the user has been silent for silenceThresholdMs.
+    sendToLLM(finalText);
+  },
+  {
+    continueOnSilence: false,
+    silenceThresholdMs: 1500, // 1.5s of silence => auto-emit & auto-stop
+    onInterimTranscript: (liveText) => {
+      liveCaption.textContent = liveText;
+    },
+  },
+);
+
+stt.start();
+// User speaks, pauses 1.5s, onTranscript fires and listening stops on its own.
+// To begin the next turn, call stt.start() again.
+```
+
+##### Observing silent session rotations
+
+When `continueOnSilence: true`, the library will silently restart the underlying recognition session whenever the browser ends it. You can observe this in the browser DevTools console — `STTLogic` prints three clearly-prefixed markers:
+
+```text
+[STT] 🔴 Session ENDED by Web Speech (sessionId=1) — will silently restart
+[STT] 🔄 Silent restart requested (newSessionId=2, restartCount=1) — committing 3 final segment(s) + interim into memory
+[STT] 🟢 Session RESTARTED silently (sessionId=2) in 180ms — committed="hello there how are you doing today"
+...
+[STT] ⏹️  Explicit STOP — emitting onTranscript once (len=284, silent restarts during session=2)
+```
+
+The `onTranscript` callback only fires on the final `⏹️ Explicit STOP` line (or when the silence threshold hits in mode 2). If you never see anything between the red/green pairs, the rotation is fully transparent — which is the intended behaviour.
 
 ### TTS (Text-to-Speech)
 
@@ -471,36 +556,43 @@ await player.close();
 ```typescript
 import { STTLogic } from "speech-to-speech";
 
+const liveEl = document.getElementById("live")!;
+const finalEl = document.getElementById("final")!;
+
 const stt = new STTLogic(
   (message, level) => console.log(`[STT ${level}] ${message}`),
-  (transcript) => {
-    document.getElementById("output")!.textContent = transcript;
+  (finalTranscript) => {
+    // Fires exactly once — when stt.stop() is called (manual mode)
+    // or when silence >= silenceThresholdMs is detected (silence mode).
+    finalEl.textContent = finalTranscript;
   },
   {
-    sessionDurationMs: 30000,
-    interimSaveIntervalMs: 5000,
+    continueOnSilence: true, // manual-stop mode — swap to false for silence auto-stop
+    // silenceThresholdMs: 1500,   // only used when continueOnSilence=false
+    onInterimTranscript: (liveText) => {
+      // Streams continuously — even across silent session rotations.
+      liveEl.textContent = liveText;
+    },
   }
 );
 
-// Listen for individual words
+// Optional: word-by-word stream of the live transcript
 stt.setWordsUpdateCallback((words) => {
-  console.log("Heard words:", words);
+  console.log("Words so far:", words);
 });
 
-// Detect speech start/end
+// Optional: rough VAD based on Web Speech interim/final transitions
 stt.setVadCallbacks(
   () => console.log("User started speaking"),
   () => console.log("User stopped speaking")
 );
 
-// Start listening
+// Start listening — silent restarts happen under the hood if Web Speech
+// ends its session; you do nothing.
 stt.start();
 
-// Stop after 10 seconds
-setTimeout(() => {
-  stt.stop();
-  console.log("Final transcript:", stt.getFullTranscript());
-}, 10000);
+// Stop whenever the user decides. Final transcript arrives via onTranscript.
+stopButton.addEventListener("click", () => stt.stop());
 
 // Cleanup on page unload
 window.addEventListener("beforeunload", () => stt.destroy());
@@ -562,22 +654,22 @@ async function init() {
   tts = new TTSLogic({ voiceId: "en_US-hfc_female-medium" });
   await tts.initialize();
 
-  // Initialize STT
+  // Initialize STT in silence-triggered mode — the library itself decides
+  // when the user is done and fires `onTranscript` automatically.
   stt = new STTLogic(
     (msg, level) => console.log(`[STT] ${msg}`),
-    (transcript) => console.log("Transcript:", transcript),
-    { sessionDurationMs: 60000 }
-  );
-
-  // Process speech when user stops talking
-  stt.setVadCallbacks(
-    () => console.log("Listening..."),
-    async () => {
-      const transcript = stt.getFullTranscript();
-      if (transcript.trim().length > 3) {
-        await processSpeech(transcript);
-        stt.clearTranscript();
+    async (finalTranscript) => {
+      // Fires once per turn, when silence >= silenceThresholdMs is detected.
+      if (finalTranscript.trim().length > 3) {
+        await processSpeech(finalTranscript);
       }
+      stt.clearTranscript();
+      stt.start(); // start next turn
+    },
+    {
+      continueOnSilence: false,
+      silenceThresholdMs: 1500,
+      onInterimTranscript: (live) => (liveCaption.textContent = live),
     }
   );
 }
@@ -668,7 +760,9 @@ service.stopSpeaking();
 
 ## Interim Transcript Streaming
 
-Get real-time partial results while the user is still speaking. Pass `onInterimTranscript` directly to `initializeSTT()`:
+Get real-time partial results while the user is still speaking. `onInterimTranscript` fires on **every** recognition update (both interim and final results) with the full live transcript — including the text committed from prior silent session rotations — so you can render a continuously-growing caption without any gaps when the browser rotates the underlying Web Speech session.
+
+Pass `onInterimTranscript` directly to `initializeSTT()`:
 
 ```ts
 import { createSpeechService } from "speech-to-speech";
@@ -677,9 +771,10 @@ const service = createSpeechService();
 
 service.initializeSTT({
   onTranscript: (finalText) => console.log("Final:", finalText),
-  onInterimTranscript: (partialText) => {
-    // Called on every interim result — great for live captions
-    liveCaption.textContent = partialText;
+  onInterimTranscript: (liveText) => {
+    // Full live text: committed sessions + current-session finals + in-flight partial.
+    // Never empties mid-session due to Web Speech's internal timeouts.
+    liveCaption.textContent = liveText;
   },
 });
 
@@ -805,7 +900,9 @@ See [Piper Voices](https://rhasspy.github.io/piper-samples/) for the complete li
 | ---------------------------------- | ------------------------------------------------------------------------------------------ |
 | "Speech Recognition not supported" | Use Chrome, Safari, or Edge. Firefox doesn't support Web Speech API.                       |
 | No transcript                      | Check microphone permissions. Ensure `stt.start()` was called.                             |
-| Transcript stops                   | Browser sessions timeout after ~30s. Library auto-restarts, but check `sessionDurationMs`. |
+| Transcript stops                   | The library silently restarts the recognition session whenever the browser ends it — nothing to configure. Open DevTools and look for the `[STT] 🔴 … 🟢` log pair to confirm a rotation happened. |
+| `onTranscript` never fires         | In `continueOnSilence: true` (default) it only fires on `stt.stop()`. Call `stop()` to get the final transcript, or switch to `continueOnSilence: false` + `silenceThresholdMs` for automatic delivery. |
+| Duplicated words in final          | Fixed in v0.1.5. If you still see duplicates, ensure you are on ≥ 0.1.5 — the old `sessionDurationMs` / `interimSaveIntervalMs` timer path no longer runs.                                          |
 
 ### Dev Server Issues (Vite)
 
@@ -841,6 +938,18 @@ npm run clean   # Remove dist/
 - **[Web Audio API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API)** - Audio processing
 
 ## Changelog
+
+### v0.1.5
+
+- **`STTLogic` — silent session rotation.** Web Speech's internal session end (the ~60s browser timeout, error retries, any spontaneous `end` event) now triggers a fully-silent restart: the library commits the current session into an in-memory transcript and starts a fresh recognition session. `onTranscript` is **not** emitted during rotations, so the consumer sees one uninterrupted listening session.
+- **`STTLogic` — dedup-safe transcript model.** The previous `results` concatenation + `collapseRepeats` safety net is replaced by a high-water-mark (`processedFinalCount`) that ingests each `isFinal` result exactly once. This eliminates the duplicate-word/line artifacts that could previously appear in the final transcript.
+- **`STTLogic` — new option `continueOnSilence` (default `true`).**
+  - `true` → manual-stop mode. `onTranscript` fires only when the consumer calls `stt.stop()`.
+  - `false` → silence-triggered mode. `onTranscript` fires (and listening auto-stops) when the user has been silent for `silenceThresholdMs`.
+- **`STTLogic` — new option `silenceThresholdMs` (default `1500`).** Silence window used when `continueOnSilence: false`.
+- **`onInterimTranscript`** now fires on every recognition update (interim AND final), and always includes the committed transcript from prior silent rotations — UI captions stay gap-free.
+- **Deprecated options (accepted for backward compatibility, now no-ops):** `sessionDurationMs`, `interimSaveIntervalMs`. Session rotation is browser-driven, not timer-driven.
+- **Observability.** `STTLogic` emits colored `[STT]` console markers on session end, silent restart, and explicit stop, so you can verify behaviour from DevTools without any extra wiring.
 
 ### v0.1.4
 
