@@ -202,6 +202,10 @@ export class ResetSTTLogic {
   private onUserSpeechStart?: () => void;
   private onUserSpeechEnd?: () => void;
   private fillerManager: FillerManager | null = null;
+  private isWindows = /windows/i.test(navigator.userAgent);
+  private lastResultTimestamp: number = 0;
+  private freezeCheckTimer: ReturnType<typeof setTimeout> | null = null;
+  private sessionStartTime: number = 0;
 
   constructor(
     onLog: LogCallback,
@@ -337,6 +341,39 @@ export class ResetSTTLogic {
     this.processedFinalCount = 0;
   }
 
+  private checkIsFrezeAndRestart(isFinal: boolean): void {
+    if (!isFinal || !this.isWindows || !this.isRecognitionRunning) {
+      return;
+    }
+    const sessionAge = Date.now() - this.sessionStartTime;
+    if (sessionAge < 20000) {
+      this.sessionStartTime = Date.now();
+      return;
+    }
+    const resultTimestamp = this.lastResultTimestamp;
+
+    if (this.freezeCheckTimer) {
+      clearTimeout(this.freezeCheckTimer);
+    }
+
+    this.freezeCheckTimer = setTimeout(() => {
+      const noNewResults = this.lastResultTimestamp === resultTimestamp;
+
+      if (
+        noNewResults &&
+        this.isListening &&
+        !this.isRestarting &&
+        this.isRecognitionRunning
+      ) {
+        this.isRestarting = true;
+
+        this.stop();
+
+        this.performRestart();
+      }
+    }, 100);
+  }
+
   private setupRecognition(): void {
     this.recognition.lang = "en-US";
     this.recognition.interimResults = true;
@@ -359,6 +396,7 @@ export class ResetSTTLogic {
           const text = (results[i][0]?.transcript || "").trim();
           if (text.length > 0) this.currentSessionFinals.push(text);
           this.processedFinalCount = i + 1;
+          this.checkIsFrezeAndRestart(results[i].isFinal);
         }
       }
 
@@ -735,6 +773,7 @@ export class ResetSTTLogic {
       if (!this.isRecognitionRunning) {
         this.sessionId++;
         this.recognition.start();
+        this.sessionStartTime = Date.now();
         this.isRecognitionRunning = true;
       }
       this.startMicTimer();
