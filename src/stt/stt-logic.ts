@@ -77,6 +77,9 @@ export interface ResetSTTOptions {
   longFillerFallback?: string;
   /** Callback when filler is generated */
   onFillerGenerated?: (type: "short" | "long", text: string) => void;
+  synthesize?: (
+    text: string,
+  ) => Promise<{ audio: Float32Array; sampleRate: number }>;
 
   // LLM Configuration for dynamic fillers
   /** LLM API URL (required for dynamic filler generation) */
@@ -89,6 +92,20 @@ export interface ResetSTTOptions {
   llmTimeoutMs?: number;
   /** Language hint for LLM (e.g., "English", "Hindi") */
   languageHint?: string;
+  shortFillerPrompt?: string;
+  longFillerPrompt?: string;
+  llmSecretKey?: string;
+  getConversationHistory?: () => {
+    role: "user" | "assistant";
+    content: string;
+  }[];
+  maxHistoryTurns?: number;
+  utteranceTimerMode?: "speechState" | "explicit";
+  /**
+   * When `false`, STT will not toggle `internalSpeechState` on interim/final
+   * results (STS/VAD should drive speaking state instead).
+   */
+  manageInternalSpeechState?: boolean;
 
   /**
    * Called on every recognition update (interim AND final) with the current
@@ -126,6 +143,9 @@ export interface ResetSTTOptions {
    * Default: 1500ms.
    */
   silenceThresholdMs?: number;
+
+  /** BCP-47 tag for Web Speech API (default: `en-US`). */
+  language?: string;
 }
 
 // Alias to match previous public surface
@@ -145,6 +165,7 @@ export class ResetSTTLogic {
     preserveTranscriptOnStart: boolean;
     continueOnSilence: boolean;
     silenceThresholdMs: number;
+    language: string;
   };
 
   private micOnTime: number = 0;
@@ -202,10 +223,15 @@ export class ResetSTTLogic {
   private onUserSpeechStart?: () => void;
   private onUserSpeechEnd?: () => void;
   private fillerManager: FillerManager | null = null;
-  private isWindows = /windows/i.test(navigator.userAgent);
+  private utteranceTimerMode: "speechState" | "explicit" = "speechState";
+  private manageInternalSpeechState = true;
+  /** Win/Linux Chromium often stop emitting results mid-utterance without firing `end`. */
+  private needsFreezeGuard =
+    /windows|linux/i.test(navigator.userAgent);
   private lastResultTimestamp: number = 0;
   private freezeCheckTimer: ReturnType<typeof setTimeout> | null = null;
   private sessionStartTime: number = 0;
+  private static readonly FREEZE_RESTART_STALL_MS = 2000;
 
   constructor(
     onLog: LogCallback,
@@ -220,9 +246,12 @@ export class ResetSTTLogic {
       preserveTranscriptOnStart: options.preserveTranscriptOnStart ?? false,
       continueOnSilence: options.continueOnSilence ?? true,
       silenceThresholdMs: Math.max(200, options.silenceThresholdMs ?? 1500),
+      language: options.language ?? "en-US",
     };
     this.sessionDuration = this.options.sessionDurationMs;
     this.onInterimTranscriptCallback = options.onInterimTranscript;
+    this.utteranceTimerMode = options.utteranceTimerMode ?? "speechState";
+    this.manageInternalSpeechState = options.manageInternalSpeechState !== false;
 
     // Initialize filler manager if any filler is enabled
     if (options.enableShortFiller || options.enableLongFiller) {
@@ -239,7 +268,14 @@ export class ResetSTTLogic {
         llmModel: options.llmModel,
         llmTimeoutMs: options.llmTimeoutMs,
         languageHint: options.languageHint,
+        shortFillerPrompt: options.shortFillerPrompt,
+        longFillerPrompt: options.longFillerPrompt,
+        llmSecretKey: options.llmSecretKey,
+        getConversationHistory: options.getConversationHistory,
+        maxHistoryTurns: options.maxHistoryTurns,
         onFillerGenerated: options.onFillerGenerated,
+        synthesize: options.synthesize,
+        utteranceTimerMode: options.utteranceTimerMode,
       });
       this.onLog(
         `[STTLogic] Filler manager initialized (short: ${
@@ -292,6 +328,10 @@ export class ResetSTTLogic {
     return this.isAutoRestarting;
   }
 
+  public isListeningActive(): boolean {
+    return this.isListening;
+  }
+
   public getFullTranscript(): string {
     return this.composeTranscript(true);
   }
@@ -341,8 +381,13 @@ export class ResetSTTLogic {
     this.processedFinalCount = 0;
   }
 
+  /**
+   * After a final segment, if no further `result` events arrive for a while
+   * (recognition "frozen" while the consumer is still listening), rotate the
+   * Web Speech session without emitting `onTranscript`.
+   */
   private checkIsFrezeAndRestart(isFinal: boolean): void {
-    if (!isFinal || !this.isWindows || !this.isRecognitionRunning) {
+    if (!isFinal || !this.needsFreezeGuard || !this.isRecognitionRunning) {
       return;
     }
     const sessionAge = Date.now() - this.sessionStartTime;
@@ -357,6 +402,7 @@ export class ResetSTTLogic {
     }
 
     this.freezeCheckTimer = setTimeout(() => {
+      this.freezeCheckTimer = null;
       const noNewResults = this.lastResultTimestamp === resultTimestamp;
 
       if (
@@ -365,17 +411,42 @@ export class ResetSTTLogic {
         !this.isRestarting &&
         this.isRecognitionRunning
       ) {
-        this.isRestarting = true;
-
-        this.stop();
-
-        this.performRestart();
+        this.recycleRecognitionSilently(
+          "🧊 No Web Speech results — silent recycle (freeze guard)",
+        );
       }
-    }, 100);
+    }, ResetSTTLogic.FREEZE_RESTART_STALL_MS);
+  }
+
+  /** Stop the browser session and `performRestart()` without consumer `onTranscript`. */
+  private clearFreezeCheckTimer(): void {
+    if (this.freezeCheckTimer) {
+      clearTimeout(this.freezeCheckTimer);
+      this.freezeCheckTimer = null;
+    }
+  }
+
+  private recycleRecognitionSilently(reason: string): void {
+    if (!this.isListening || this.isRestarting) return;
+
+    this.onLog(reason, "warning");
+    console.info(
+      `%c[STT] ${reason} (sessionId=${this.sessionId})`,
+      "color:#8e44ad;font-weight:bold",
+    );
+
+    this.commitCurrentSession();
+    try {
+      this.recognition.stop();
+    } catch {
+      // performRestart will call start() again.
+    }
+    this.isRecognitionRunning = false;
+    this.performRestart();
   }
 
   private setupRecognition(): void {
-    this.recognition.lang = "en-US";
+    this.recognition.lang = this.options.language;
     this.recognition.interimResults = true;
     this.recognition.continuous = true;
     (this.recognition as any).maxAlternatives = 1;
@@ -384,6 +455,7 @@ export class ResetSTTLogic {
       const speechEvent = event as SpeechRecognitionEvent;
       const results = speechEvent.results;
       const now = Date.now();
+      this.lastResultTimestamp = now;
 
       // --- 1. Pick up newly-final results we haven't yet accounted for ----
       //   Web Speech keeps all historical results in `results` and flips each
@@ -416,13 +488,17 @@ export class ResetSTTLogic {
 
       // --- 3. VAD heuristic (rough, webspeech has no true VAD events) -----
       if (!lastIsFinal && this.lastWasFinal) {
-        internalSpeechState.setSpeaking(true);
+        if (this.manageInternalSpeechState) {
+          internalSpeechState.setSpeaking(true);
+        }
         try {
           this.onUserSpeechStart?.();
         } catch {}
       }
       if (lastIsFinal && !this.lastWasFinal) {
-        internalSpeechState.setSpeaking(false);
+        if (this.manageInternalSpeechState) {
+          internalSpeechState.setSpeaking(false);
+        }
         try {
           this.onUserSpeechEnd?.();
         } catch {}
@@ -777,6 +853,10 @@ export class ResetSTTLogic {
         this.isRecognitionRunning = true;
       }
       this.startMicTimer();
+      if (this.fillerManager && this.utteranceTimerMode === "explicit") {
+        this.fillerManager.beginUtteranceFillers();
+      }
+
       this.onLog(
         `Listening started (mode=${
           this.options.continueOnSilence
@@ -799,6 +879,7 @@ export class ResetSTTLogic {
     if (!this.isListening) return;
 
     try {
+      this.clearFreezeCheckTimer();
       this.isListening = false;
       this.isAutoRestarting = false;
       // Guard against the silence-detection tick firing between here and
@@ -850,6 +931,7 @@ export class ResetSTTLogic {
   }
 
   public destroy(): void {
+    this.clearFreezeCheckTimer();
     this.isListening = false;
     this.stopMicTimer();
 
@@ -889,6 +971,11 @@ export class ResetSTTLogic {
    */
   getFillerManager(): FillerManager | null {
     return this.fillerManager;
+  }
+
+  /** Abort scheduled / in-flight filler generation for the current utterance. */
+  cancelPendingFillers(): void {
+    this.fillerManager?.cancelForFinalTranscript();
   }
 
   /**

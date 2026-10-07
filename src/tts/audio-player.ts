@@ -42,20 +42,53 @@ export interface QueuedAudio {
 export type AudioPlayerStatusCallback = (status: string) => void;
 export type PlayingStateCallback = (playing: boolean) => void;
 
+const DEFAULT_SAMPLE_RATE = 22050;
+const DEFAULT_VOLUME = 1.0;
+
+function normalizeAudioPlayerConfig(
+  config: AudioPlayerConfig,
+): Required<AudioPlayerConfig> {
+  const sampleRate = config.sampleRate;
+  const volume = config.volume;
+  return {
+    sampleRate:
+      typeof sampleRate === "number" && Number.isFinite(sampleRate)
+        ? sampleRate
+        : DEFAULT_SAMPLE_RATE,
+    volume:
+      typeof volume === "number" && Number.isFinite(volume)
+        ? Math.max(0, Math.min(1, volume))
+        : DEFAULT_VOLUME,
+    autoPlay: config.autoPlay ?? true,
+  };
+}
+
+function mergeAudioPlayerConfig(
+  base: AudioPlayerConfig,
+  patch: AudioPlayerConfig,
+): AudioPlayerConfig {
+  const merged: AudioPlayerConfig = { ...base };
+  if (patch.sampleRate !== undefined) merged.sampleRate = patch.sampleRate;
+  if (patch.volume !== undefined) merged.volume = patch.volume;
+  if (patch.autoPlay !== undefined) merged.autoPlay = patch.autoPlay;
+  return merged;
+}
+
 /**
  * Audio Player for Web Audio API
  * Supports queue-based playback with autoPlay
  */
 export class AudioPlayer {
   private static instance: AudioPlayer | null = null;
-  private static sharedConfig: AudioPlayerConfig = {
-    sampleRate: 22050,
-    volume: 1.0,
-    autoPlay: true,
-  };
+  private static sharedConfig: Required<AudioPlayerConfig> =
+    normalizeAudioPlayerConfig({
+      sampleRate: DEFAULT_SAMPLE_RATE,
+      volume: DEFAULT_VOLUME,
+      autoPlay: true,
+    });
 
   private audioContext: AudioContext | null = null;
-  private config: AudioPlayerConfig;
+  private config: Required<AudioPlayerConfig>;
   private currentSource: AudioBufferSourceNode | null = null;
 
   // Queue-related properties
@@ -71,12 +104,12 @@ export class AudioPlayer {
   private speechStateUnsubscribe?: () => void;
 
   constructor(config: AudioPlayerConfig = {}) {
-    this.config = {
-      sampleRate: 22050,
-      volume: 1.0,
+    this.config = normalizeAudioPlayerConfig({
+      sampleRate: DEFAULT_SAMPLE_RATE,
+      volume: DEFAULT_VOLUME,
       autoPlay: false,
       ...config,
-    };
+    });
 
     // Auto-subscribe to internal speech state (from STTLogic)
     this.speechStateUnsubscribe = internalSpeechState.onSpeakingChange(
@@ -100,7 +133,9 @@ export class AudioPlayer {
       );
       return;
     }
-    AudioPlayer.sharedConfig = { ...AudioPlayer.sharedConfig, ...config };
+    AudioPlayer.sharedConfig = normalizeAudioPlayerConfig(
+      mergeAudioPlayerConfig(AudioPlayer.sharedConfig, config),
+    );
   }
 
   /**
@@ -201,9 +236,13 @@ export class AudioPlayer {
    * Note: If user is speaking, audio is queued but NOT played until user stops
    */
   addAudioIntoQueue(audioData: Float32Array, sampleRate?: number): void {
+    const rate =
+      typeof sampleRate === "number" && Number.isFinite(sampleRate)
+        ? sampleRate
+        : this.config.sampleRate;
     const audio: QueuedAudio = {
       audioData,
-      sampleRate: sampleRate ?? this.config.sampleRate!,
+      sampleRate: rate,
     };
     this.audioQueue.push(audio);
     this.log(
@@ -282,14 +321,23 @@ export class AudioPlayer {
       await ctx.resume();
     }
 
-    const audioBuffer = ctx.createBuffer(1, audioData.length, sampleRate);
+    const rate =
+      typeof sampleRate === "number" && Number.isFinite(sampleRate)
+        ? sampleRate
+        : this.config.sampleRate;
+
+    if (!audioData?.length) {
+      return;
+    }
+
+    const audioBuffer = ctx.createBuffer(1, audioData.length, rate);
     audioBuffer.getChannelData(0).set(audioData);
 
     const source = ctx.createBufferSource();
     source.buffer = audioBuffer;
 
     const gainNode = ctx.createGain();
-    gainNode.gain.value = this.config.volume!;
+    gainNode.gain.value = this.config.volume;
 
     source.connect(gainNode);
     gainNode.connect(ctx.destination);
@@ -351,6 +399,7 @@ export class AudioPlayer {
    * Set volume (0.0 to 1.0)
    */
   setVolume(volume: number): void {
+    if (!Number.isFinite(volume)) return;
     this.config.volume = Math.max(0, Math.min(1, volume));
   }
 
@@ -386,10 +435,9 @@ export class AudioPlayer {
 
   private getAudioContext(): AudioContext {
     if (!this.audioContext) {
-      this.audioContext = new (window.AudioContext ||
-        (window as any).webkitAudioContext)({
-        sampleRate: this.config.sampleRate,
-      });
+      const Ctx =
+        window.AudioContext || (window as any).webkitAudioContext;
+      this.audioContext = new Ctx({ sampleRate: this.config.sampleRate });
     }
     return this.audioContext;
   }

@@ -1,125 +1,160 @@
 /**
  * stt-tts-lib - Speech-to-Text and Text-to-Speech Library
  * Copyright (C) 2026 Navgurukul
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { MicVAD, getDefaultRealTimeVADOptions } from "@ricky0123/vad-web";
+import {
+  MicVAD,
+  getDefaultRealTimeVADOptions,
+  type RealTimeVADOptions,
+} from "@ricky0123/vad-web";
+import * as ort from "onnxruntime-web/wasm";
 
-export type VADControllerOptions = {
-  bufferSize?: number;
-  minSpeechMs?: number;
-  minSilenceMs?: number;
-  energyThreshold?: number;
-  dynamicThresholdFactor?: number;
-  noiseFloorSmoothing?: number;
-  noiseFloorDecay?: number;
-  maxAmplitude?: number;
+export type VadAssetPaths = {
+  /** Directory containing vad worklet/assets (trailing slash recommended). */
+  baseAssetPath?: string;
+  /** ONNX runtime WASM path prefix (trailing slash recommended). */
+  onnxWASMBasePath?: string;
 };
 
+export type VADControllerOptions = {
+  minSpeechMs?: number;
+  minSilenceMs?: number;
+  positiveSpeechThreshold?: number;
+  negativeSpeechThreshold?: number;
+  assetPaths?: VadAssetPaths;
+};
+
+/**
+ * Neural mic VAD (@ricky0123/vad-web). Framework-agnostic; used by STS when
+ * `enableVAD` is true to gate Web Speech start/stop on real human speech.
+ */
 export class VADController {
   private vad: MicVAD | null = null;
+  private vadInit: Promise<MicVAD> | null = null;
   private voiceStartListeners = new Set<() => void>();
   private voiceStopListeners = new Set<() => void>();
+  private voiceMisfireListeners = new Set<() => void>();
   private running = false;
-  private options?: VADControllerOptions;
+  private readonly options?: VADControllerOptions;
 
   constructor(options?: VADControllerOptions) {
     this.options = options;
-  }
-
-  public async start(): Promise<void> {
-    if (this.running && this.vad) {
-      if (!this.vad.listening) {
-        await this.vad.start();
-      }
-      return;
-    }
-
     if (
       typeof navigator === "undefined" ||
-      !navigator.mediaDevices ||
-      !navigator.mediaDevices.getUserMedia
+      !navigator.mediaDevices?.getUserMedia
     ) {
       throw new Error("Microphone access is not available.");
     }
+  }
 
-    try {
-      const ortAny = (window as any).ort;
-      if (ortAny && ortAny.env && ortAny.env.wasm) {
-        ortAny.env.wasm.wasmPaths = "/ort/";
-      }
+  private getOnnxWasmBasePath(): string {
+    return this.options?.assetPaths?.onnxWASMBasePath ?? "/ort/";
+  }
 
-      if (!this.vad) {
-        const defaultOptions = getDefaultRealTimeVADOptions("v5");
+  private configureOrt(): void {
+    const wasmPaths = this.getOnnxWasmBasePath();
+    ort.env.wasm.wasmPaths = wasmPaths;
+    // Safer under COEP / dev servers; avoids threaded WASM import hangs.
+    ort.env.wasm.numThreads = 1;
+    ort.env.logLevel = "warning";
+  }
 
-        // Configure custom options
-        this.vad = await MicVAD.new({
-          ...defaultOptions,
-          startOnLoad: false,
-          onSpeechStart: () => {
-            this.emitVoiceStart();
-          },
-          onSpeechEnd: (audio: Float32Array) => {
-            this.emitVoiceStop();
-          },
-          onVADMisfire: () => {},
-          minSpeechMs: this.options?.minSpeechMs || 150,
-          positiveSpeechThreshold: 0.5,
-          negativeSpeechThreshold: 0.35,
-          redemptionMs: this.options?.minSilenceMs || 450,
-          preSpeechPadMs: 50,
-          processorType: "ScriptProcessor",
+  private buildVadOptions(): RealTimeVADOptions {
+    const defaults = getDefaultRealTimeVADOptions("v5");
+    const baseAssetPath = this.options?.assetPaths?.baseAssetPath ?? "/vad/";
+    const onnxWASMBasePath = this.getOnnxWasmBasePath();
 
-          onnxWASMBasePath: "/ort/",
-          baseAssetPath: "/vad/",
-          workletOptions: {},
+    return {
+      ...defaults,
+      model: "v5",
+      minSpeechMs: this.options?.minSpeechMs ?? 400,
+      redemptionMs: this.options?.minSilenceMs ?? 1200,
+      positiveSpeechThreshold:
+        this.options?.positiveSpeechThreshold ??
+        defaults.positiveSpeechThreshold,
+      negativeSpeechThreshold:
+        this.options?.negativeSpeechThreshold ??
+        defaults.negativeSpeechThreshold,
+      startOnLoad: false,
+      processorType: "ScriptProcessor",
+      onSpeechStart: () => {
+        // Early hint only — STT gating uses onSpeechRealStart (validated speech).
+      },
+      onSpeechRealStart: () => this.emitVoiceStart(),
+      onSpeechEnd: () => this.emitVoiceStop(),
+      onVADMisfire: () => this.emitVoiceMisfire(),
+      baseAssetPath,
+      onnxWASMBasePath,
+      ortConfig: (ortInstance) => {
+        try {
+          ortInstance.env.logLevel = "warning";
+          ortInstance.env.wasm.numThreads = 1;
+        } catch {
+          // ignore
+        }
+      },
+    };
+  }
+
+  /**
+   * Load ONNX model + ORT WASM (no microphone yet). Call during STS init.
+   */
+  public async prepare(): Promise<void> {
+    await this.getOrCreateVad();
+  }
+
+  private async getOrCreateVad(): Promise<MicVAD> {
+    if (this.vad) return this.vad;
+    if (!this.vadInit) {
+      this.configureOrt();
+      this.vadInit = MicVAD.new(this.buildVadOptions())
+        .then((vad) => {
+          this.vad = vad;
+          return vad;
+        })
+        .catch((error) => {
+          this.vadInit = null;
+          throw error;
         });
-      }
-
-      if (!this.vad.listening) {
-        await this.vad.start();
-      }
-
-      this.running = true;
-    } catch (error: any) {
-      this.running = false;
-      throw new Error(
-        error?.message || "Failed to initialize voice activity detector"
-      );
     }
+    return this.vadInit;
+  }
+
+  public async start(): Promise<void> {
+    const vad = await this.getOrCreateVad();
+    if (vad.listening) {
+      this.running = true;
+      return;
+    }
+    await vad.start();
+    this.running = true;
   }
 
   public stop(): void {
     if (!this.running || !this.vad) return;
     try {
-      this.vad.pause();
+      void this.vad.pause();
       this.running = false;
-    } catch (error) {}
+    } catch {
+      this.running = false;
+    }
   }
 
   public destroy(): void {
     this.stop();
     if (this.vad) {
       try {
-        this.vad.destroy();
-      } catch (error) {}
+        void this.vad.destroy();
+      } catch {
+        // ignore
+      }
       this.vad = null;
     }
+    this.vadInit = null;
     this.voiceStartListeners.clear();
     this.voiceStopListeners.clear();
+    this.voiceMisfireListeners.clear();
   }
 
   public isActive(): boolean {
@@ -136,23 +171,41 @@ export class VADController {
     return () => this.voiceStopListeners.delete(listener);
   }
 
+  public onVoiceMisfire(listener: () => void): () => void {
+    this.voiceMisfireListeners.add(listener);
+    return () => this.voiceMisfireListeners.delete(listener);
+  }
+
   private emitVoiceStart(): void {
-    this.voiceStartListeners.forEach((listener) => {
+    for (const listener of this.voiceStartListeners) {
       try {
         listener();
       } catch (error) {
         console.error("Error in voice start listener:", error);
       }
-    });
+    }
   }
 
   private emitVoiceStop(): void {
-    this.voiceStopListeners.forEach((listener) => {
+    for (const listener of this.voiceStopListeners) {
       try {
         listener();
       } catch (error) {
         console.error("Error in voice stop listener:", error);
       }
-    });
+    }
+  }
+
+  private emitVoiceMisfire(): void {
+    for (const listener of this.voiceMisfireListeners) {
+      try {
+        listener();
+      } catch (error) {
+        console.error("Error in voice misfire listener:", error);
+      }
+    }
   }
 }
+
+/** Alias matching common consumer naming. */
+export { VADController as VoiceActivityDetector };

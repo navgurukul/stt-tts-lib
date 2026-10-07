@@ -80,8 +80,22 @@ export interface FillerConfig {
   onFillerGenerated?: (type: "short" | "long", text: string) => void;
   /** Custom synthesizer function (overrides internal TTS if provided) */
   synthesize?: (
-    text: string
+    text: string,
   ) => Promise<{ audio: Float32Array; sampleRate: number }>;
+  /** Optional secret header for LLM requests */
+  llmSecretKey?: string;
+  /** Prior turns for filler context (consumer history preferred). */
+  getConversationHistory?: () => {
+    role: "user" | "assistant";
+    content: string;
+  }[];
+  /** Max turns to include in filler LLM context (default 10). */
+  maxHistoryTurns?: number;
+  /**
+   * `speechState` — start/stop timers from `internalSpeechState` (legacy STT).
+   * `explicit` — call `beginUtteranceFillers()` when a Web Speech utterance starts (STS/VAD).
+   */
+  utteranceTimerMode?: "speechState" | "explicit";
 }
 
 const DEFAULT_CONFIG = {
@@ -94,9 +108,34 @@ const DEFAULT_CONFIG = {
   llmModel: "deepseek-chat",
   shortFillerPrompt: SHORT_FILLER_SYSTEM_PROMPT,
   longFillerPrompt: LONG_FILLER_SYSTEM_PROMPT,
-  llmTimeoutMs: 3000,
+  llmTimeoutMs: 15000,
   languageHint: "English",
+  utteranceTimerMode: "speechState" as "speechState" | "explicit",
 };
+
+function mergeFillerConfig(
+  base: typeof DEFAULT_CONFIG &
+    Pick<
+      FillerConfig,
+      | "llmApiUrl"
+      | "llmApiKey"
+      | "llmSecretKey"
+      | "onFillerGenerated"
+      | "synthesize"
+      | "ttsVoice"
+      | "getConversationHistory"
+      | "maxHistoryTurns"
+    >,
+  patch: Partial<FillerConfig>,
+): typeof base {
+  const next = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value !== undefined) {
+      (next as Record<string, unknown>)[key] = value;
+    }
+  }
+  return next;
+}
 
 export class FillerManager {
   private config: typeof DEFAULT_CONFIG &
@@ -104,9 +143,12 @@ export class FillerManager {
       FillerConfig,
       | "llmApiUrl"
       | "llmApiKey"
+      | "llmSecretKey"
       | "onFillerGenerated"
       | "synthesize"
       | "ttsVoice"
+      | "getConversationHistory"
+      | "maxHistoryTurns"
     >;
 
   private speechStartedAt = 0;
@@ -119,14 +161,19 @@ export class FillerManager {
   private inFlight = 0;
   private ttsLogic: TTSLogic | null = null;
   private ttsInitPromise: Promise<void> | null = null;
+  private utteranceCancelled = false;
+  /** Bumped on each `beginUtteranceFillers()` to ignore stale LLM responses. */
+  private activeUtteranceId = 0;
 
   // Exposed for consumer to see generated fillers
   public shortFiller: string | null = null;
   public longFiller: string | null = null;
 
   constructor(config: FillerConfig = {}) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
-    this.setupSpeechStateListener();
+    this.config = mergeFillerConfig({ ...DEFAULT_CONFIG }, config);
+    if (this.config.utteranceTimerMode === "speechState") {
+      this.setupSpeechStateListener();
+    }
     this.initializeTTS();
   }
 
@@ -148,7 +195,7 @@ export class FillerManager {
    * Update configuration
    */
   configure(config: Partial<FillerConfig>): void {
-    this.config = { ...this.config, ...config };
+    this.config = mergeFillerConfig(this.config, config);
   }
 
   /**
@@ -175,7 +222,14 @@ export class FillerManager {
     });
   }
 
-  private onSpeechStart(): void {
+  /**
+   * Start short/long filler timers for the current Web Speech utterance.
+   * Resets any prior timers and prior utterance filler state.
+   */
+  beginUtteranceFillers(): void {
+    this.clearTimers();
+    this.activeUtteranceId += 1;
+    this.utteranceCancelled = false;
     this.speechStartedAt = Date.now();
     this.shortFillerGenerated = false;
     this.longFillerGenerated = false;
@@ -183,21 +237,28 @@ export class FillerManager {
     this.longFiller = null;
     this.currentPartialTranscript = "";
 
-    console.log("[FillerManager] Speech started, scheduling fillers");
+    const shortDelay = this.config.shortFillerDelayMs ?? 5000;
+    const longDelay = this.config.longFillerDelayMs ?? 10000;
 
-    // Schedule short filler
+    console.log(
+      `[FillerManager] Utterance listening — short filler in ${shortDelay}ms, long in ${longDelay}ms`,
+    );
+
     if (this.config.enableShortFiller) {
       this.shortFillerTimer = setTimeout(() => {
-        this.generateFiller("short");
-      }, this.config.shortFillerDelayMs);
+        void this.generateFiller("short");
+      }, shortDelay);
     }
 
-    // Schedule long filler
     if (this.config.enableLongFiller) {
       this.longFillerTimer = setTimeout(() => {
-        this.generateFiller("long");
-      }, this.config.longFillerDelayMs);
+        void this.generateFiller("long");
+      }, longDelay);
     }
+  }
+
+  private onSpeechStart(): void {
+    this.beginUtteranceFillers();
   }
 
   private onSpeechEnd(): void {
@@ -217,7 +278,18 @@ export class FillerManager {
     }
   }
 
+  /**
+   * Call when the final transcript is ready: stop scheduling fillers and
+   * ignore any in-flight LLM responses for this utterance (fetch is not aborted
+   * so DevTools can still show a completed response if the server finishes).
+   */
+  cancelForFinalTranscript(): void {
+    this.utteranceCancelled = true;
+    this.clearTimers();
+  }
+
   private async generateFiller(type: "short" | "long"): Promise<void> {
+    if (this.utteranceCancelled) return;
     // Prevent duplicate generation
     if (type === "short" && this.shortFillerGenerated) return;
     if (type === "long" && this.longFillerGenerated) return;
@@ -230,18 +302,42 @@ export class FillerManager {
     }
 
     this.inFlight++;
+    const utteranceId = this.activeUtteranceId;
 
     let fillerText: string;
 
     // Try LLM generation if configured
     if (this.config.llmApiUrl && this.config.llmApiKey) {
       try {
-        fillerText = await this.generateFillerWithLLM(type);
+        fillerText = await this.generateFillerWithLLM(type, utteranceId);
+        if (
+          this.utteranceCancelled ||
+          utteranceId !== this.activeUtteranceId
+        ) {
+          this.inFlight--;
+          return;
+        }
         console.log(
-          `[FillerManager] LLM generated ${type} filler: "${fillerText}"`
+          `[FillerManager] LLM generated ${type} filler: "${fillerText}"`,
         );
       } catch (error) {
-        console.error(`[FillerManager] LLM failed, using fallback:`, error);
+        const reason =
+          error instanceof Error ? error.message : String(error);
+        if (
+          reason === "filler-utterance-stale" ||
+          this.utteranceCancelled ||
+          utteranceId !== this.activeUtteranceId
+        ) {
+          this.inFlight--;
+          return;
+        }
+        if (reason === "filler-llm-timeout") {
+          console.warn(
+            `[FillerManager] ${type} filler LLM timed out after ${this.config.llmTimeoutMs ?? 3000}ms — using fallback`,
+          );
+        } else {
+          console.error(`[FillerManager] LLM failed, using fallback:`, error);
+        }
         fillerText =
           type === "short"
             ? this.config.shortFillerFallback
@@ -254,7 +350,7 @@ export class FillerManager {
           ? this.config.shortFillerFallback
           : this.config.longFillerFallback;
       console.log(
-        `[FillerManager] Using fallback ${type} filler: "${fillerText}"`
+        `[FillerManager] Using fallback ${type} filler: "${fillerText}"`,
       );
     }
 
@@ -263,6 +359,11 @@ export class FillerManager {
       this.shortFiller = fillerText;
     } else {
       this.longFiller = fillerText;
+    }
+
+    if (this.utteranceCancelled) {
+      this.inFlight--;
+      return;
     }
 
     // Notify consumer
@@ -285,14 +386,27 @@ export class FillerManager {
     } catch (error) {
       console.error(
         `[FillerManager] Failed to synthesize ${type} filler:`,
-        error
+        error,
       );
     }
 
     this.inFlight--;
   }
 
-  private async generateFillerWithLLM(type: "short" | "long"): Promise<string> {
+  private getHistoryMessages(): { role: "user" | "assistant"; content: string }[] {
+    const maxTurns = this.config.maxHistoryTurns ?? 10;
+    const history = this.config.getConversationHistory?.() ?? [];
+    const maxMessages = maxTurns * 2;
+    if (history.length <= maxMessages) {
+      return history;
+    }
+    return history.slice(history.length - maxMessages);
+  }
+
+  private async generateFillerWithLLM(
+    type: "short" | "long",
+    utteranceId: number,
+  ): Promise<string> {
     const systemPrompt =
       type === "short"
         ? this.config.shortFillerPrompt
@@ -313,43 +427,55 @@ export class FillerManager {
       .filter(Boolean)
       .join("\n");
 
-    const controller = new AbortController();
-    const timeout = setTimeout(
-      () => controller.abort(),
-      this.config.llmTimeoutMs
-    );
+    const timeoutMs = this.config.llmTimeoutMs ?? 3000;
 
-    try {
-      const response = await fetch(this.config.llmApiUrl!, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.config.llmApiKey}`,
-        },
-        body: JSON.stringify({
-          model: this.config.llmModel,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userMessage },
-          ],
-          stream: false,
-        }),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeout);
-
-      if (!response.ok) {
-        throw new Error(`LLM API error: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const content = data.choices?.[0]?.message?.content || "";
-      return content.trim().slice(0, 100) || this.getFallback(type);
-    } catch (error) {
-      clearTimeout(timeout);
-      throw error;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${this.config.llmApiKey}`,
+    };
+    if (this.config.llmSecretKey) {
+      headers["X-Secret-Key"] = this.config.llmSecretKey;
     }
+
+    const historyMessages = this.getHistoryMessages();
+
+    const body = JSON.stringify({
+      model: this.config.llmModel,
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...historyMessages,
+        { role: "user", content: userMessage },
+      ],
+      stream: false,
+    });
+
+    const fetchPromise = fetch(this.config.llmApiUrl!, {
+      method: "POST",
+      headers,
+      body,
+    });
+
+    const response = await Promise.race([
+      fetchPromise,
+      new Promise<Response>((_, reject) => {
+        setTimeout(
+          () => reject(new Error("filler-llm-timeout")),
+          timeoutMs,
+        );
+      }),
+    ]);
+
+    if (utteranceId !== this.activeUtteranceId || this.utteranceCancelled) {
+      throw new Error("filler-utterance-stale");
+    }
+
+    if (!response.ok) {
+      throw new Error(`LLM API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const content = data.choices?.[0]?.message?.content || "";
+    return content.trim().slice(0, 100) || this.getFallback(type);
   }
 
   private getFallback(type: "short" | "long"): string {

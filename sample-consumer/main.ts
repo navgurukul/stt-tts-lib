@@ -1,22 +1,19 @@
 /**
- * Sample demonstrating how to consume stt-tts-lib package
- * This imports the library from the installed .tgz package
- *
- * Note: No separate ort-setup.js needed - ORT is configured automatically
- * by the library when you call createPiperSynthesizer()
+ * Sample demonstrating the consumer hook APIs from speech-to-speech.
  */
 
-// Import from the installed speech-to-speech package
 import {
-  STTLogic,
-  TTSLogic,
-  AudioPlayer,
-  sharedAudioPlayer,
-  ensureWasmCached,
+  initializeSpeechToText,
+  useSpeechToText,
+  initializeTextToSpeech,
+  useTextToSpeech,
+  initializeSpeechToSpeech,
+  useSpeechToSpeech,
+  useSharedAudioPlayer,
+  prefetchTextToSpeechAssets,
 } from "speech-to-speech";
-import type { WasmPaths } from "speech-to-speech";
+import type { WasmPaths } from "speech-to-speech/tts";
 
-// Extend Window interface for global functions
 declare global {
   interface Window {
     clearLog: () => void;
@@ -26,26 +23,26 @@ declare global {
     synthesizeText: () => Promise<void>;
     stopAudio: () => void;
     prefetchWasmCache: () => Promise<void>;
-    // STS functions
     initSTS: () => Promise<void>;
     startSTS: () => void;
     stopSTS: () => void;
+    teardownDemoTab: (tabName: string) => void;
+    syncStsOptionFields: () => void;
   }
 }
 
-// Global state
-let sttLogic: STTLogic | null = null;
-let piperSynthesizer: TTSLogic | null = null;
-let audioPlayer: AudioPlayer | null = null;
+type DemoTab = "stt" | "tts" | "sts" | "info";
+let currentDemoTab: DemoTab = "stt";
 
-// STS state
-let stsSTT: STTLogic | null = null;
-let stsTTS: TTSLogic | null = null;
-let stsConversationHistory: { role: "user" | "assistant"; content: string }[] =
-  [];
-let stsProcessing = false;
+let sttControls: ReturnType<typeof useSpeechToText> | null = null;
+let ttsControls: ReturnType<typeof useTextToSpeech> | null = null;
+let stsControls: ReturnType<typeof useSpeechToSpeech> | null = null;
+let stsTts: ReturnType<typeof useTextToSpeech> | null = null;
+const player = useSharedAudioPlayer();
 
-// Utility: Add log entry
+type ChatTurn = { role: "user" | "assistant"; content: string };
+const stsChatHistory: ChatTurn[] = [];
+
 function addLog(message: string, type = "info") {
   const logDiv = document.getElementById("log");
   if (!logDiv) return;
@@ -101,65 +98,48 @@ function getWasmConfigFromUi(): {
   return { enableWasmCache, wasmPaths };
 }
 
-// Expose to window for HTML onclick handlers
 window.clearLog = clearLog;
 window.prefetchWasmCache = async function () {
   try {
-    const { enableWasmCache } = getWasmConfigFromUi();
+    const { enableWasmCache, wasmPaths } = getWasmConfigFromUi();
     if (enableWasmCache === false) {
       addLog("WASM cache is disabled. Enable it to prefetch.", "info");
       return;
     }
-
-    const baseUrl = getWasmBaseUrlFromUi();
-    addLog(
-      baseUrl
-        ? `Prefetching WASM assets from ${baseUrl}...`
-        : "Prefetching WASM assets from the default CDN...",
-      "info",
-    );
-
-    await ensureWasmCached(baseUrl);
-    addLog("✓ WASM assets cached (blob URLs ready)", "success");
-  } catch (error: any) {
-    addLog(`✗ Failed to prefetch WASM assets: ${error.message}`, "error");
-    console.error(error);
+    addLog("Prefetching TTS WASM assets...", "info");
+    await prefetchTextToSpeechAssets({ wasmPaths });
+    addLog("✓ WASM assets cached", "success");
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    addLog(`✗ Prefetch failed: ${message}`, "error");
   }
 };
-
-//=============================================================================
-// STT Functions
-//=============================================================================
 
 window.startSTT = async function () {
   try {
     addLog("Starting Speech-to-Text...", "info");
 
-    // Initialize STT Logic if not already done
-    if (!sttLogic) {
-      addLog("Initializing STTLogic from stt-tts-lib...", "info");
+    initializeSpeechToText({
+      continueOnSilence: true,
+      silenceThresholdMs: 5000,
+      preserveTranscriptOnStart: false,
+    });
 
-      sttLogic = new STTLogic(
-        // onLog callback
-        (msg: string, level?: string) =>
-          addLog(`[STT] ${msg}`, level || "info"),
-        // onTranscript callback
-        (transcript: string) => {
-          const el = document.getElementById(
-            "transcript",
-          ) as HTMLTextAreaElement | null;
-          if (el) el.value = transcript;
-        },
-        // options
-        {
-          continueOnSilence: true,
-          silenceThresholdMs: 5000,
-          preserveTranscriptOnStart: false,
-        },
-      );
-
-      // Hook word updates to display heard words
-      sttLogic.setWordsUpdateCallback((heardWords: string[]) => {
+    sttControls = useSpeechToText({
+      onLog: (msg, level) => addLog(`[STT] ${msg}`, level || "info"),
+      onInterimTranscript: (text) => {
+        const el = document.getElementById(
+          "transcript",
+        ) as HTMLTextAreaElement | null;
+        if (el) el.value = text;
+      },
+      onFinalTranscript: (text) => {
+        const el = document.getElementById(
+          "transcript",
+        ) as HTMLTextAreaElement | null;
+        if (el) el.value = text;
+      },
+      onWordsUpdate: (heardWords) => {
         const wordsDiv = document.getElementById("heardWords");
         if (!wordsDiv) return;
         if (heardWords.length > 0) {
@@ -172,28 +152,25 @@ window.startSTT = async function () {
         } else {
           wordsDiv.innerHTML = "<em>No words yet</em>";
         }
-      });
+      },
+    });
 
-      addLog("✓ STTLogic initialized successfully", "success");
-    }
-
-    sttLogic.start();
+    sttControls.startTranscript();
 
     (document.getElementById("startSttBtn") as HTMLButtonElement).disabled =
       true;
     (document.getElementById("stopSttBtn") as HTMLButtonElement).disabled =
       false;
-
     addLog("✓ Listening started", "success");
-  } catch (error: any) {
-    addLog(`✗ Failed to start STT: ${error.message}`, "error");
-    console.error(error);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    addLog(`✗ Failed to start STT: ${message}`, "error");
   }
 };
 
 window.stopSTT = function () {
-  if (sttLogic) {
-    sttLogic.stop();
+  if (sttControls) {
+    sttControls.stopTranscript();
     (document.getElementById("startSttBtn") as HTMLButtonElement).disabled =
       false;
     (document.getElementById("stopSttBtn") as HTMLButtonElement).disabled =
@@ -202,9 +179,56 @@ window.stopSTT = function () {
   }
 };
 
-//=============================================================================
-// STS (Speech-to-Speech) Functions
-//=============================================================================
+function parsePositiveInt(value: string, fallback: number): number {
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+function getStsOptionsFromUi() {
+  const shortFillerWords =
+    (document.getElementById("stsShortFiller") as HTMLInputElement)?.checked ??
+    false;
+  const longFillerWords =
+    (document.getElementById("stsLongFiller") as HTMLInputElement)?.checked ??
+    false;
+  const shortFillerDelayMs = parsePositiveInt(
+    (document.getElementById("stsShortFillerDelayMs") as HTMLInputElement)
+      ?.value ?? "5000",
+    5000,
+  );
+  const longFillerDelayMs = parsePositiveInt(
+    (document.getElementById("stsLongFillerDelayMs") as HTMLInputElement)
+      ?.value ?? "10000",
+    10000,
+  );
+  const fillerRequestTimeoutMs = parsePositiveInt(
+    (document.getElementById("stsFillerTimeoutMs") as HTMLInputElement)?.value ??
+      "15000",
+    15000,
+  );
+  const languageHint =
+    (
+      document.getElementById("stsLanguageHint") as HTMLInputElement
+    )?.value?.trim() || "English";
+
+  return {
+    shortFillerWords,
+    longFillerWords,
+    shortFillerDelayMs,
+    longFillerDelayMs,
+    fillerRequestTimeoutMs,
+    languageHint,
+  };
+}
+
+function setStsConfigFieldsDisabled(disabled: boolean) {
+  document.querySelectorAll(".sts-config-field").forEach((el) => {
+    (el as HTMLInputElement).disabled = disabled;
+  });
+  if (!disabled) {
+    window.syncStsOptionFields();
+  }
+}
 
 function updateStsStatus(
   message: string,
@@ -217,109 +241,67 @@ function updateStsStatus(
   }
 }
 
-/**
- * Send text to LLM and get response
- */
-async function sendToLLM(userMessage: string): Promise<string> {
-  const apiUrl = (document.getElementById("stsApiUrl") as HTMLInputElement)
-    .value;
-  const apiKey = (document.getElementById("stsApiKey") as HTMLInputElement)
-    .value;
-  const model = (document.getElementById("stsModel") as HTMLInputElement).value;
-
-  if (!apiUrl || !apiKey) {
-    throw new Error("Please configure LLM API URL and Key");
+async function handleStsUserTurn(
+  userText: string,
+  apiUrl: string,
+  apiKey: string,
+  model: string,
+) {
+  if (!stsTts?.isReady()) {
+    addLog("✗ TTS not ready for agent reply", "error");
+    return;
   }
 
-  // Add user message to history
-  stsConversationHistory.push({ role: "user", content: userMessage });
-
-  const messages = [
-    {
-      role: "system" as const,
-      content:
-        "You are a helpful voice assistant. Keep responses concise and conversational (2-3 sentences max). Be friendly and natural.",
-    },
-    ...stsConversationHistory,
-  ];
-
-  addLog(`📤 Sending to LLM: "${userMessage.substring(0, 50)}..."`, "info");
-
-  const response = await fetch(apiUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      stream: false,
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`LLM API error: ${response.status}`);
-  }
-
-  const data = await response.json();
-  const assistantMessage =
-    data.choices?.[0]?.message?.content || "Sorry, I couldn't process that.";
-
-  // Add assistant response to history
-  stsConversationHistory.push({ role: "assistant", content: assistantMessage });
-
-  // Keep history manageable (last 10 exchanges)
-  if (stsConversationHistory.length > 20) {
-    stsConversationHistory = stsConversationHistory.slice(-20);
-  }
-
-  return assistantMessage;
-}
-
-/**
- * Process user speech: send to LLM and speak response
- */
-async function processSpeechToSpeech(transcript: string): Promise<void> {
-  if (stsProcessing || !transcript.trim()) return;
-
-  stsProcessing = true;
-  updateStsStatus("🤔 Thinking...", "info");
+  stsChatHistory.push({ role: "user", content: userText });
 
   try {
-    // Get LLM response
-    const aiResponse = await sendToLLM(transcript);
-    addLog(`📥 LLM response: "${aiResponse.substring(0, 60)}..."`, "success");
+    addLog("🤔 Calling LLM (consumer)...", "info");
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a helpful voice assistant. Keep responses concise (2-3 sentences).",
+          },
+          ...stsChatHistory,
+        ],
+        stream: false,
+      }),
+    });
 
-    // Update UI
-    const responseEl = document.getElementById(
-      "stsAiResponse",
-    ) as HTMLTextAreaElement;
-    if (responseEl) responseEl.value = aiResponse;
-
-    updateStsStatus("🔊 Speaking...", "info");
-
-    // Synthesize and play response
-    if (stsTTS) {
-      const sentences = aiResponse
-        .split(/(?<=[.!?])\s+/)
-        .filter((s) => s.trim());
-
-      for (const sentence of sentences) {
-        const result = await stsTTS.synthesize(sentence);
-        sharedAudioPlayer.addAudioIntoQueue(result.audio, result.sampleRate);
-      }
-
-      // Wait for playback to complete
-      await sharedAudioPlayer.waitForQueueCompletion();
+    if (!response.ok) {
+      throw new Error(`LLM failed (${response.status})`);
     }
 
-    updateStsStatus("🎤 Listening...", "success");
-  } catch (error: any) {
-    addLog(`✗ STS error: ${error.message}`, "error");
-    updateStsStatus(`Error: ${error.message}`, "error");
-  } finally {
-    stsProcessing = false;
+    const data = (await response.json()) as {
+      choices?: { message?: { content?: string } }[];
+    };
+    const reply =
+      data.choices?.[0]?.message?.content?.trim() ||
+      "Sorry, I could not process that.";
+
+    const el = document.getElementById(
+      "stsAiResponse",
+    ) as HTMLTextAreaElement;
+    if (el) el.value = reply;
+
+    stsChatHistory.push({ role: "assistant", content: reply });
+    if (stsChatHistory.length > 20) {
+      stsChatHistory.splice(0, stsChatHistory.length - 20);
+    }
+
+    addLog(`🤖 Agent: "${reply}"`, "success");
+    await stsTts.speakSentences(reply);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    addLog(`✗ Agent turn failed: ${message}`, "error");
   }
 }
 
@@ -327,167 +309,162 @@ window.initSTS = async function () {
   try {
     const voiceId = (document.getElementById("stsVoiceId") as HTMLInputElement)
       .value;
+    const apiUrl = (document.getElementById("stsApiUrl") as HTMLInputElement)
+      .value;
+    const apiKey = (document.getElementById("stsApiKey") as HTMLInputElement)
+      .value;
+    const model = (document.getElementById("stsModel") as HTMLInputElement)
+      .value;
 
     updateStsStatus("Initializing...", "info");
     addLog("🚀 Initializing Speech-to-Speech...", "info");
 
-    // Configure shared audio player
-    sharedAudioPlayer.configure({ autoPlay: true });
-    sharedAudioPlayer.setStatusCallback((status) =>
-      addLog(`[Audio] ${status}`, "info"),
+    const wasmConfig = getWasmConfigFromUi();
+    const stsOptions = getStsOptionsFromUi();
+
+    addLog("Loading VAD model (ORT + Silero)…", "info");
+
+    addLog(
+      `Filler config: short=${stsOptions.shortFillerWords} (${stsOptions.shortFillerDelayMs}ms), long=${stsOptions.longFillerWords} (${stsOptions.longFillerDelayMs}ms)`,
+      "info",
     );
 
-    // Initialize TTS
-    const wasmConfig = getWasmConfigFromUi();
-    stsTTS = new TTSLogic({ voiceId, ...wasmConfig });
-    await stsTTS.initialize();
-    addLog("✓ TTS initialized", "success");
+    await initializeSpeechToSpeech({
+      stt: {
+        preserveTranscriptOnStart: false,
+        heuristics: {
+          llmEndpoint: apiUrl,
+          apiKey,
+          model,
+          shortFillerWords: stsOptions.shortFillerWords,
+          longFillerWords: stsOptions.longFillerWords,
+          shortFillerDelayMs: stsOptions.shortFillerDelayMs,
+          longFillerDelayMs: stsOptions.longFillerDelayMs,
+          fillerRequestTimeoutMs: stsOptions.fillerRequestTimeoutMs,
+          languageHint: stsOptions.languageHint,
+        },
+      },
+      tts: {
+        voiceId,
+        ...wasmConfig,
+        autoPlay: true,
+      },
+      bargeIn: true,
+    });
 
-    // Initialize STT with transcript callback
-    stsSTT = new STTLogic(
-      (msg, level) => addLog(`[STT] ${msg}`, level || "info"),
-      (transcript) => {
-        // Update transcript display on every update
-        const transcriptEl = document.getElementById(
+    player.setStatusCallback((status) => addLog(`[Audio] ${status}`, "info"));
+    stsTts = useTextToSpeech({ player });
+
+    stsControls = useSpeechToSpeech({
+      onLog: (msg, level) => addLog(`[STT] ${msg}`, level || "info"),
+      getConversationHistory: () => stsChatHistory,
+      onInterimTranscript: (text) => {
+        const el = document.getElementById(
           "stsUserTranscript",
         ) as HTMLTextAreaElement;
-        if (transcriptEl) transcriptEl.value = transcript;
+        if (el) el.value = text;
       },
-      {
-        sessionDurationMs: 60000,
-        interimSaveIntervalMs: 3000,
-        preserveTranscriptOnStart: false,
+      onFillerGenerated: (type, text) => {
+        addLog(`💬 Filler (${type}): "${text}"`, "info");
       },
-    );
+      onFinalTranscript: (text) => {
+        addLog(`🎤 Final: "${text}"`, "info");
+        void handleStsUserTurn(text, apiUrl, apiKey, model);
+      },
+      onAgentStateChange: (state) => {
+        const labels: Record<string, string> = {
+          idle: "Idle",
+          listening: "🎤 Listening...",
+          speaking: "🔊 Speaking...",
+        };
+        updateStsStatus(labels[state] ?? state, "success");
+      },
+      onSpeakingChange: (speaking) => {
+        if (speaking) updateStsStatus("🎤 Listening...", "success");
+      },
+    });
 
-    // Set callback for when user stops speaking
-    stsSTT.setVadCallbacks(
-      () => {
-        // onSpeechStart
-        updateStsStatus("🎤 Listening...", "success");
-      },
-      async () => {
-        // onSpeechEnd - process the transcript
-        const transcript = stsSTT?.getFullTranscript() || "";
-        if (transcript.trim().length > 3 && !stsProcessing) {
-          addLog(`🎤 Speech ended: "${transcript}"`, "info");
-          await processSpeechToSpeech(transcript);
-          // Clear transcript for next utterance after processing
-          stsSTT?.clearTranscript();
-        }
-      },
-    );
-
-    addLog("✓ STT initialized", "success");
-
-    // Enable buttons
     (document.getElementById("startStsBtn") as HTMLButtonElement).disabled =
       false;
     (document.getElementById("initStsBtn") as HTMLButtonElement).disabled =
       true;
+    setStsConfigFieldsDisabled(true);
 
     updateStsStatus("Ready! Click Start to begin.", "success");
-    addLog("✅ Speech-to-Speech ready!", "success");
-  } catch (error: any) {
-    addLog(`✗ STS init failed: ${error.message}`, "error");
-    updateStsStatus(`Init failed: ${error.message}`, "error");
+    addLog("✅ Speech-to-Speech ready (VAD loaded)", "success");
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    addLog(`✗ STS init failed: ${message}`, "error");
+    updateStsStatus(`Init failed: ${message}`, "error");
   }
 };
 
-window.startSTS = function () {
-  if (!stsSTT) {
+window.startSTS = async function () {
+  if (!stsControls) {
     addLog("✗ Please initialize STS first", "error");
     return;
   }
 
-  // Clear previous conversation display
   (document.getElementById("stsUserTranscript") as HTMLTextAreaElement).value =
     "";
   (document.getElementById("stsAiResponse") as HTMLTextAreaElement).value = "";
+  stsChatHistory.length = 0;
 
-  stsSTT.start();
-
-  (document.getElementById("startStsBtn") as HTMLButtonElement).disabled = true;
-  (document.getElementById("stopStsBtn") as HTMLButtonElement).disabled = false;
-
-  updateStsStatus("🎤 Listening... Speak now!", "success");
-  addLog("🎤 Conversation started - speak now!", "success");
+  try {
+    await stsControls.startConversation();
+    (document.getElementById("startStsBtn") as HTMLButtonElement).disabled =
+      true;
+    (document.getElementById("stopStsBtn") as HTMLButtonElement).disabled =
+      false;
+    addLog("🎤 Conversation started — microphone active", "success");
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    addLog(`✗ Could not start conversation: ${message}`, "error");
+  }
 };
 
 window.stopSTS = function () {
-  if (stsSTT) {
-    stsSTT.stop();
-  }
-  sharedAudioPlayer.stopAndClearQueue();
-  stsProcessing = false;
-
+  stsControls?.stopConversation();
   (document.getElementById("startStsBtn") as HTMLButtonElement).disabled =
     false;
   (document.getElementById("stopStsBtn") as HTMLButtonElement).disabled = true;
-
   updateStsStatus("Stopped", "info");
   addLog("⏹️ Conversation stopped", "info");
 };
 
-//=============================================================================
-// TTS Functions
-//=============================================================================
-
 window.initTTS = async function () {
   try {
-    // Get voice ID from input
     const voiceInput = (
       document.getElementById("modelPath") as HTMLInputElement
     ).value;
 
-    addLog(`Initializing Piper TTS with voice: ${voiceInput}...`, "info");
+    addLog(`Initializing TTS (voice: ${voiceInput})...`, "info");
 
-    // Create audio player with autoPlay enabled for queue-based playback
-    if (sharedAudioPlayer) {
-      sharedAudioPlayer.configure({ autoPlay: true });
-      // Set callbacks to observe queue behavior
-      sharedAudioPlayer.setStatusCallback((status) => addLog(status, "info"));
-      sharedAudioPlayer.setPlayingChangeCallback((playing) => {
-        addLog(`Playing state: ${playing}`, playing ? "success" : "info");
-      });
-
-      addLog("✓ Audio player created with autoPlay enabled", "success");
-    }
-
-    // Create synthesizer using the Piper library
     const wasmConfig = getWasmConfigFromUi();
-    piperSynthesizer = new TTSLogic({
+    await initializeTextToSpeech({
       voiceId: voiceInput,
       ...wasmConfig,
+      autoPlay: true,
     });
-    await piperSynthesizer.initialize();
 
-    addLog("✓ Piper synthesizer initialized", "success");
+    player.setStatusCallback((status) => addLog(status, "info"));
+    player.setPlayingChangeCallback((playing) => {
+      addLog(`Playing: ${playing}`, playing ? "success" : "info");
+    });
 
+    ttsControls = useTextToSpeech({ player });
+    addLog("✓ TTS ready", "success");
     (document.getElementById("synthesizeBtn") as HTMLButtonElement).disabled =
       false;
-  } catch (error: any) {
-    addLog(`✗ Failed to initialize TTS: ${error.message}`, "error");
-    console.error(error);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    addLog(`✗ TTS init failed: ${message}`, "error");
   }
 };
 
-/**
- * Split text into sentences by punctuation marks
- * This allows for streaming synthesis with reduced latency
- */
-function splitIntoSentences(text: string): string[] {
-  // Split by sentence-ending punctuation while keeping the punctuation
-  const sentences = text
-    .split(/(?<=[.!?;])\s+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  return sentences;
-}
-
 window.synthesizeText = async function () {
-  if (!piperSynthesizer) {
-    addLog("✗ Please initialize TTS first", "error");
+  if (!ttsControls?.isReady()) {
+    addLog("✗ Initialize TTS first", "error");
     return;
   }
 
@@ -495,122 +472,72 @@ window.synthesizeText = async function () {
     const text = (document.getElementById("ttsText") as HTMLTextAreaElement)
       .value;
     if (!text.trim()) {
-      addLog("✗ Please enter some text", "error");
+      addLog("✗ Enter text to synthesize", "error");
       return;
     }
 
-    // Split text into sentences for streaming synthesis
-    const sentences = splitIntoSentences(text);
+    const start = performance.now();
+    await ttsControls.speakSentences(text);
+    await player.waitUntilIdle();
     addLog(
-      `📝 Split into ${sentences.length} sentence(s) for streaming`,
-      "info",
-    );
-
-    const startTime = performance.now();
-    let firstSentenceSynthesized = false;
-
-    // Synthesize each sentence and add to queue (non-blocking)
-    for (let i = 0; i < sentences.length; i++) {
-      const sentence = sentences[i];
-      addLog(
-        `🔄 Synthesizing [${i + 1}/${sentences.length}]: "${sentence.substring(
-          0,
-          40,
-        )}${sentence.length > 40 ? "..." : ""}"`,
-        "info",
-      );
-
-      const sentenceStart = performance.now();
-      const result = await piperSynthesizer.synthesize(sentence);
-      const sentenceTime = performance.now() - sentenceStart;
-
-      addLog(
-        `✓ [${i + 1}] Synthesized ${
-          result.audio.length
-        } samples (${result.duration.toFixed(2)}s) in ${sentenceTime.toFixed(
-          0,
-        )}ms`,
-        "success",
-      );
-
-      // Add to audio queue - autoPlay will start playback immediately
-      if (sharedAudioPlayer) {
-        sharedAudioPlayer.addAudioIntoQueue(result.audio, result.sampleRate);
-
-        if (!firstSentenceSynthesized) {
-          const timeToFirstAudio = performance.now() - startTime;
-          addLog(
-            `⚡ Time to first audio: ${timeToFirstAudio.toFixed(
-              0,
-            )}ms (vs waiting for full synthesis)`,
-            "success",
-          );
-          firstSentenceSynthesized = true;
-        }
-      }
-    }
-
-    const totalSynthTime = performance.now() - startTime;
-    addLog(
-      `✅ All ${sentences.length} sentences queued in ${totalSynthTime.toFixed(
-        0,
-      )}ms`,
+      `✅ Playback complete (${(performance.now() - start).toFixed(0)}ms)`,
       "success",
     );
-    addLog(
-      `📊 Queue size: ${sharedAudioPlayer?.getQueueSize() ?? 0} | Playing: ${
-        sharedAudioPlayer?.isAudioPlaying() ?? false
-      }`,
-      "info",
-    );
-
-    // Optionally wait for all audio to complete
-    if (sharedAudioPlayer) {
-      await sharedAudioPlayer.waitForQueueCompletion();
-      const totalTime = performance.now() - startTime;
-      addLog(
-        `🎵 All audio playback complete in ${totalTime.toFixed(0)}ms total`,
-        "success",
-      );
-    }
-  } catch (error: any) {
-    addLog(`✗ Synthesis failed: ${error.message}`, "error");
-    console.error(error);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    addLog(`✗ Synthesis failed: ${message}`, "error");
   }
 };
 
 window.stopAudio = function () {
-  if (sharedAudioPlayer) {
-    sharedAudioPlayer.stopAndClearQueue();
-    addLog("Audio stopped and queue cleared", "info");
-  }
+  player.stopAndClear();
+  ttsControls?.stopSpeaking();
+  addLog("Audio stopped", "info");
 };
 
-//=============================================================================
-// Initialize
-//=============================================================================
+function teardownDemoTab(tabName: string) {
+  switch (tabName) {
+    case "stt":
+      window.stopSTT();
+      break;
+    case "tts":
+      ttsControls?.stopSpeaking();
+      player.stopAndClear();
+      addLog("Tab switch: stopped TTS synthesis and audio", "info");
+      break;
+    case "sts":
+      window.stopSTS();
+      break;
+    default:
+      break;
+  }
+}
+
+window.teardownDemoTab = function (tabName: string) {
+  if (tabName === currentDemoTab) return;
+  teardownDemoTab(currentDemoTab);
+  currentDemoTab = tabName as DemoTab;
+};
+
+window.syncStsOptionFields = function () {
+  const shortOn =
+    (document.getElementById("stsShortFiller") as HTMLInputElement)?.checked ??
+    false;
+  const longOn =
+    (document.getElementById("stsLongFiller") as HTMLInputElement)?.checked ??
+    false;
+  const fillersOn = shortOn || longOn;
+  document.querySelectorAll(".sts-filler-field").forEach((el) => {
+    (el as HTMLInputElement).disabled = !fillersOn;
+  });
+};
 
 window.addEventListener("DOMContentLoaded", () => {
-  addLog("STT-TTS Library Consumer Sample loaded", "success");
-  addLog("Library imported successfully from stt-tts-lib package", "success");
-
-  // Check if we're in a browser that supports the APIs
-  if (
-    !("webkitSpeechRecognition" in window) &&
-    !("SpeechRecognition" in window)
-  ) {
-    addLog("⚠ Speech Recognition API not supported in this browser", "error");
-  } else {
-    addLog("✓ Speech Recognition API available", "success");
-  }
+  window.syncStsOptionFields();
+  addLog("Consumer sample loaded (hook APIs)", "success");
 });
 
-// Cleanup on page unload
 window.addEventListener("beforeunload", () => {
-  if (sttLogic) {
-    sttLogic.destroy();
-  }
-  if (audioPlayer) {
-    sharedAudioPlayer.stop();
-  }
+  sttControls?.destroyTranscription();
+  stsControls?.destroy();
 });

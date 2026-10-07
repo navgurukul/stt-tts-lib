@@ -10,3 +10,4 @@ dist/
 copilot-instructions.md
 *.tgz
 .env
+server

@@ -4,57 +4,252 @@ TypeScript utilities for speech-to-text (STT) and text-to-speech (TTS) in the br
 
 **Features:**
 
-- 🎤 **STT**: Browser-native speech recognition with session management
+- 🎤 **STT**: Browser Web Speech with silent session rotation and live interim captions
+- 🗣️ **Speech-to-speech**: VAD-gated hooks (`initializeSpeechToSpeech` / `useSpeechToSpeech`) with optional filler words; you own the agent LLM
 - 🔊 **TTS**: Piper neural TTS with automatic model downloading
-- ⚡ **WASM Caching**: Automatic browser caching eliminates repeated downloads
-- 🎵 **Shared Audio Queue**: Auto-play audio queue for seamless playback
-- ✅ **Zero Config**: No manual ONNX setup required - everything is handled automatically
-- 📦 **Small**: ~135KB package size
+- ⚡ **WASM caching**: Browser Cache API for Piper / ONNX assets
+- 🎵 **Shared audio queue**: One app-wide player via `useSharedAudioPlayer()`
+- 🧩 **Consumer hooks**: `initialize*` + `use*` pattern (framework-agnostic; works in React/Vue/vanilla)
+- 📦 **Vite plugin**: `speech-to-speech/vite` serves `/ort/` and `/vad/` in dev and production builds
 
-## Quick Start
+## Prerequisites
 
-### Installation
+| Requirement             | `useSpeechToText`                        | `useTextToSpeech`                           | `useSpeechToSpeech` (VAD always on)                |
+| ----------------------- | ---------------------------------------- | ------------------------------------------- | -------------------------------------------------- |
+| **Browser**             | Chrome, Edge, or Safari (Web Speech API) | Modern browser + Web Audio                  | Same as STT + TTS                                  |
+| **`onnxruntime-web`**   | Not required                             | **Required** (peer dependency)              | **Required**                                       |
+| **COOP / COEP headers** | Not required                             | Recommended for WASM                        | **Required** (`SharedArrayBuffer` / ORT WASM)      |
+| **Microphone**          | User permission                          | —                                           | User permission                                    |
+| **HTTPS or localhost**  | Recommended for mic                      | —                                           | **Required** for `getUserMedia`                    |
+| **Vite (optional)**     | —                                        | Use `speech-to-speech/vite` if you use Vite | **Strongly recommended** (serves ORT + VAD assets) |
+
+Install:
 
 ```bash
 npm install speech-to-speech onnxruntime-web
 ```
 
-> **Note:** `onnxruntime-web` is a peer dependency required for TTS functionality.
+Peer dependencies (install in your app):
 
-### Basic Usage
+- **`onnxruntime-web`** — Piper TTS and VAD inference in the browser
+- **`vite`** (optional) — only if you import `speech-to-speech/vite`
+
+`@ricky0123/vad-web` is bundled as a dependency of `speech-to-speech` for neural VAD; the Vite plugin copies its `dist` assets to `/vad/` at dev/build time. You do **not** need to vendor VAD source into your repo.
+
+**Before first run (Vite apps):**
+
+1. Add `speechAssetsPlugin` and COOP/COEP headers (see [Vite configuration](#vite-configuration-required)).
+2. Call `initializeTextToSpeech` or `initializeSpeechToSpeech` early (loads Piper + VAD models).
+3. For STS, call `await initializeSpeechToSpeech(...)` then `await agent.startConversation()` so the VAD model and mic are ready when the user starts.
+
+See `sample-consumer/` in this repository for a full demo (STT, TTS, and STS tabs).
+
+## Quick Start
+
+### Installation
+
+Same as [prerequisites](#prerequisites) — `npm install speech-to-speech onnxruntime-web`.
+
+### Basic Usage (consumer hooks)
+
+Load assets early, then wire callbacks when the user is ready to interact:
 
 ```typescript
-import { STTLogic, TTSLogic, sharedAudioPlayer } from "speech-to-speech";
+import {
+  initializeSpeechToText,
+  useSpeechToText,
+  initializeTextToSpeech,
+  useTextToSpeech,
+  useSharedAudioPlayer,
+} from "speech-to-speech";
 
-// Configure shared audio player (auto-plays when audio is added)
-sharedAudioPlayer.configure({ autoPlay: true });
+// --- Speech-to-text only ---
+initializeSpeechToText({
+  continueOnSilence: true, // final transcript when you call stopTranscript()
+  silenceThresholdMs: 1500, // used when continueOnSilence is false
+});
 
-// Speech-to-Text
-const stt = new STTLogic(
-  (msg, level) => console.log(`[${level}] ${msg}`),
-  (transcript) => console.log("Transcript:", transcript)
-);
-stt.start();
+const stt = useSpeechToText({
+  onLog: (message, level) => console.log(`[STT ${level}] ${message}`),
+  onInterimTranscript: (text) => console.log("interim:", text),
+  onFinalTranscript: (text) => console.log("final:", text),
+});
 
-// Text-to-Speech with auto-play queue
-const tts = new TTSLogic({ voiceId: "en_US-hfc_female-medium" });
-await tts.initialize(); // WASM files cached automatically
+stt.startTranscript();
+// stt.stopTranscript();
+// stt.destroyTranscription();
 
-const result = await tts.synthesize("Hello world!");
-sharedAudioPlayer.addAudioIntoQueue(result.audio, result.sampleRate);
-// Audio plays automatically!
+// --- Text-to-speech only (preload on app load) ---
+await initializeTextToSpeech({
+  voiceId: "en_US-hfc_female-medium",
+});
+
+const tts = useTextToSpeech();
+await tts.speak("Hello world!");
+
+// --- Shared audio queue (optional; used by default for TTS) ---
+const player = useSharedAudioPlayer();
+player.configure({ autoPlay: true });
 ```
+
+**Speech-to-speech (VAD-gated voice UI):**
+
+STS **always** uses neural VAD (`@ricky0123/vad-web`). The consumer owns the main LLM turn; the SDK handles mic gating, Web Speech per utterance, optional **filler words**, and TTS playback helpers.
+
+- **VAD voice start** → Web Speech `start()` for that utterance; filler timers begin.
+- **VAD voice end** → Web Speech `stop()` → `onFinalTranscript` (one per utterance).
+- Web Speech runs with **`continueOnSilence: true` internally** (silent browser restarts; no app final until VAD ends the utterance).
+- **`heuristics`** → LLM used only for short/long **fillers** (not the agent reply).
+- **`bargeIn: true`** (default) → VAD speech during TTS clears the queue and starts a new utterance.
+
+```typescript
+import {
+  initializeSpeechToSpeech,
+  useSpeechToSpeech,
+  useTextToSpeech,
+  useSharedAudioPlayer,
+} from "speech-to-speech";
+
+const player = useSharedAudioPlayer();
+const history: { role: "user" | "assistant"; content: string }[] = [];
+
+await initializeSpeechToSpeech({
+  stt: {
+    language: "en-US",
+    preserveTranscriptOnStart: false,
+    vad: {
+      minSpeechMs: 400,
+      minSilenceMs: 1200,
+      assetPaths: {
+        baseAssetPath: "/vad/",
+        onnxWASMBasePath: "/ort/",
+      },
+    },
+    heuristics: {
+      llmEndpoint: "https://api.example.com/v1/chat/completions",
+      apiKey: process.env.LLM_KEY!,
+      model: "deepseek-chat",
+      shortFillerWords: true,
+      longFillerWords: false,
+      shortFillerDelayMs: 5000,
+      longFillerDelayMs: 10000,
+    },
+  },
+  tts: { voiceId: "en_US-hfc_female-medium", autoPlay: true },
+  bargeIn: true,
+});
+
+const tts = useTextToSpeech({ player });
+
+const agent = useSpeechToSpeech({
+  getConversationHistory: () => history,
+  onLog: (msg, level) => console.log(`[STS ${level}]`, msg),
+  onInterimTranscript: (text) => setLiveCaption(text),
+  onFillerGenerated: (type, text) => console.log(`filler (${type}):`, text),
+  onFinalTranscript: async (text) => {
+    history.push({ role: "user", content: text });
+    const reply = await callYourLlm(history); // your API
+    history.push({ role: "assistant", content: reply });
+    await tts.speakSentences(reply);
+  },
+  onAgentStateChange: (state) => {
+    // idle | listening | speaking
+    setStatus(state);
+  },
+});
+
+await agent.startConversation();
+// agent.stopConversation();
+// agent.destroy();
+```
+
+> **Note:** Import from the main package only for app code. Class-based APIs (`STTLogic`, `TTSLogic`, etc.) are internal building blocks under `speech-to-speech/stt` and `speech-to-speech/tts` — not part of the supported consumer surface.
+
+## Consumer hooks API
+
+The **main export** (`speech-to-speech`) is the only supported integration path for applications. Use `initialize*` to preload configuration, then `use*` to wire callbacks and receive controls — framework-agnostic (vanilla, React, Vue, etc.).
+
+| Phase                   | Speech-to-text                           | Text-to-speech                                    | Speech-to-speech                                         |
+| ----------------------- | ---------------------------------------- | ------------------------------------------------- | -------------------------------------------------------- |
+| **Configure / preload** | `initializeSpeechToText(config)`         | `await initializeTextToSpeech(config)`            | `await initializeSpeechToSpeech({ stt, tts, bargeIn? })` |
+| **Wire UI**             | `useSpeechToText(handlers)`              | `useTextToSpeech({ player? })`                    | `useSpeechToSpeech(handlers)`                            |
+| **Run**                 | `startTranscript()` / `stopTranscript()` | `speak()` / `speakSentences()` / `stopSpeaking()` | `await startConversation()` / `stopConversation()`       |
+| **Cleanup**             | `destroyTranscription()`                 | —                                                 | `destroy()`                                              |
+
+**Prefetch TTS WASM** (optional, before `initializeTextToSpeech`):
+
+```typescript
+import { prefetchTextToSpeechAssets } from "speech-to-speech";
+
+await prefetchTextToSpeechAssets({
+  voiceId: "en_US-hfc_female-medium",
+  wasmPaths: { piperData: "...", piperWasm: "..." },
+});
+```
+
+**Shared audio player** (singleton used by default for TTS/STS):
+
+```typescript
+import { useSharedAudioPlayer } from "speech-to-speech";
+
+const player = useSharedAudioPlayer();
+player.configure({ autoPlay: true, volume: 1 });
+player.stopAndClear();
+```
+
+### `initializeSpeechToText` / `useSpeechToText`
+
+| Option                                  | Applies to        | Description                                                                                                                     |
+| --------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `continueOnSilence: true` (default)     | **STT hook only** | Web Speech keeps listening across silent browser restarts. **`onFinalTranscript` fires once** when you call `stopTranscript()`. |
+| `continueOnSilence: false`              | **STT hook only** | After `silenceThresholdMs` of no speech, **`onFinalTranscript` fires** and listening stops.                                     |
+| `silenceThresholdMs`                    | STT hook only     | Used when `continueOnSilence` is `false` (default `1500`).                                                                      |
+| `language`, `preserveTranscriptOnStart` | STT + STS         | BCP-47 tag and transcript preservation on `start`.                                                                              |
+
+STS does **not** expose `continueOnSilence` — it is always `true` inside the wrapper; utterance boundaries come from **VAD**, not Web Speech silence.
+
+### `SpeechToSpeechSttConfig`
+
+| Field        | Description                                                                                                                                    |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `vad`        | Neural VAD tuning (`minSpeechMs`, `minSilenceMs`, `assetPaths` → `/vad/` + `/ort/`). Always on for STS.                                        |
+| `heuristics` | Filler LLM only: `llmEndpoint`, `apiKey`, `shortFillerWords`, `longFillerWords`, delays, `fillerRequestTimeoutMs`, prompts, `maxHistoryTurns`. |
+| `language`   | Web Speech BCP-47 tag (default `en-US`).                                                                                                       |
+
+### `useSpeechToSpeech` handlers
+
+| Handler                  | Description                                                                                                       |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `onInterimTranscript`    | Live caption for the current utterance.                                                                           |
+| `onFinalTranscript`      | User turn complete (VAD speech end). **You call your LLM and TTS here.**                                          |
+| `onFillerGenerated`      | Short/long filler text when ready (parallel to final; in-flight fillers are dropped if the utterance ends first). |
+| `getConversationHistory` | Optional; preferred source for filler LLM context (else SDK keeps last N turns).                                  |
+| `onAgentStateChange`     | `idle` \| `listening` \| `speaking` (speaking = shared player playing).                                           |
+| `onSpeakingChange`       | VAD mic speech start/stop.                                                                                        |
+
+Controls: `startConversation()`, `stopConversation()`, `clearTranscription()`, `setConversationHistory()`, `appendConversationTurn()`, `destroy()`.
+
+`stopConversation()` stops VAD/STT, cancels pending fillers, and clears TTS playback.
+
+### Deprecated
+
+`createSpeechService()` remains exported for legacy apps; do not use it in new code.
 
 ## Vite Configuration (Required)
 
-For Vite-based projects, add this configuration to `vite.config.ts`:
+For Vite-based projects, add this configuration to `vite.config.ts`. The plugin serves ONNX Runtime files at **`/ort/*`** and VAD worklet/model files at **`/vad/*`** (from `onnxruntime-web` and `@ricky0123/vad-web` in `node_modules`). It can also copy those folders into your build output when `copyForProduction: true`.
+
+**Do not copy plugin source into your app** — import from the package:
 
 ### Basic Configuration
 
 ```typescript
 import { defineConfig } from "vite";
+import { speechAssetsPlugin } from "speech-to-speech/vite";
 
 export default defineConfig({
+  plugins: [speechAssetsPlugin({ copyForProduction: true })],
+
   server: {
     port: 3000,
     headers: {
@@ -83,9 +278,9 @@ export default defineConfig({
 });
 ```
 
-### Advanced Configuration (If you encounter WASM loading issues)
+### Advanced Configuration (legacy manual ORT middleware)
 
-If you experience issues with ONNX Runtime WASM files, use this extended configuration:
+Prefer `speechAssetsPlugin` above. If you still have issues with ONNX paths, you can use a custom middleware (ORT only — it does not serve `/vad/`):
 
 ```typescript
 import { defineConfig } from "vite";
@@ -102,7 +297,7 @@ function serveOrtFiles() {
         const filePath = path.join(
           __dirname,
           "node_modules/onnxruntime-web/dist",
-          urlPath
+          urlPath,
         );
 
         if (fs.existsSync(filePath)) {
@@ -111,8 +306,8 @@ function serveOrtFiles() {
             ext === ".mjs" || ext === ".js"
               ? "application/javascript"
               : ext === ".wasm"
-              ? "application/wasm"
-              : "application/octet-stream";
+                ? "application/wasm"
+                : "application/octet-stream";
 
           res.setHeader("Content-Type", contentType);
           res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
@@ -134,7 +329,7 @@ function patchPiperTtsWeb() {
       if (id.includes("@mintplex-labs/piper-tts-web")) {
         return code.replace(
           /https:\/\/cdnjs\.cloudflare\.com\/ajax\/libs\/onnxruntime-web\/1\.18\.0\//g,
-          "/ort/"
+          "/ort/",
         );
       }
       return code;
@@ -148,7 +343,7 @@ export default defineConfig({
     alias: {
       "onnxruntime-web/wasm": path.resolve(
         __dirname,
-        "node_modules/onnxruntime-web/dist/ort.webgpu.mjs"
+        "node_modules/onnxruntime-web/dist/ort.webgpu.mjs",
       ),
     },
   },
@@ -215,34 +410,37 @@ Since this library uses browser APIs, you **must** ensure it only runs on the cl
 "use client";
 
 import { useEffect, useState, useRef } from "react";
-import type { TTSLogic } from "speech-to-speech";
 
 export default function SpeechComponent() {
   const [isReady, setIsReady] = useState(false);
-  const ttsRef = useRef<TTSLogic | null>(null);
+  const ttsRef = useRef<ReturnType<
+    typeof import("speech-to-speech").useTextToSpeech
+  > | null>(null);
 
   useEffect(() => {
     async function initTTS() {
-      const { TTSLogic, sharedAudioPlayer } = await import("speech-to-speech");
+      const {
+        initializeTextToSpeech,
+        useTextToSpeech,
+        useSharedAudioPlayer,
+      } = await import("speech-to-speech");
 
-      sharedAudioPlayer.configure({ autoPlay: true });
+      const player = useSharedAudioPlayer();
+      player.configure({ autoPlay: true });
 
-      ttsRef.current = new TTSLogic({ voiceId: "en_US-hfc_female-medium" });
-      await ttsRef.current.initialize();
+      await initializeTextToSpeech({
+        voiceId: "en_US-hfc_female-medium",
+      });
+      ttsRef.current = useTextToSpeech({ player });
       setIsReady(true);
     }
 
     initTTS();
-    return () => {
-      ttsRef.current?.dispose();
-    };
   }, []);
 
   const speak = async (text: string) => {
-    if (!ttsRef.current) return;
-    const { sharedAudioPlayer } = await import("speech-to-speech");
-    const result = await ttsRef.current.synthesize(text);
-    sharedAudioPlayer.addAudioIntoQueue(result.audio, result.sampleRate);
+    if (!ttsRef.current?.isReady()) return;
+    await ttsRef.current.speak(text);
   };
 
   return (
@@ -255,479 +453,138 @@ export default function SpeechComponent() {
 
 ## Exports
 
+**Applications should import only from the main entry:**
+
 ```typescript
-// Main bundle (STT + TTS + Service wrapper)
 import {
-  // Service wrapper (new in 0.1.4)
-  createSpeechService,
   // STT
-  STTLogic,
-  getCompatibilityInfo,
+  initializeSpeechToText,
+  useSpeechToText,
   // TTS
-  TTSLogic,
-  prefetchTTSModel,
-  cleanTextForTTS,
-  AudioPlayer,
-  createAudioPlayer,
-  sharedAudioPlayer,
+  initializeTextToSpeech,
+  useTextToSpeech,
+  prefetchTextToSpeechAssets,
+  // STS
+  initializeSpeechToSpeech,
+  useSpeechToSpeech,
+  // Audio
+  useSharedAudioPlayer,
+  createSharedAudioPlayer,
+  // Utils
+  getCompatibilityInfo,
 } from "speech-to-speech";
 
-// STT only
-import {
-  STTLogic,
-  ResetSTTLogic,
-  VADController,
-  getCompatibilityInfo,      // new in 0.1.4
-} from "speech-to-speech/stt";
-
-// TTS only
-import {
-  TTSLogic,
-  prefetchTTSModel,          // new in 0.1.4
-  cleanTextForTTS,           // new in 0.1.4
-  AudioPlayer,
-  createAudioPlayer,
-  sharedAudioPlayer,
-  ensureWasmCached,
-  isWasmCached,
-  clearWasmCache,
-} from "speech-to-speech/tts";
+// Vite dev/build plugin (vite.config.ts only — Node)
+import { speechAssetsPlugin } from "speech-to-speech/vite";
 ```
 
-## API Reference
+Optional utilities (not hooks): `cleanTextForTTS` from `speech-to-speech/tts`.  
+`createSpeechService` is deprecated on the main export.
 
-### STT (Speech-to-Text)
+The `speech-to-speech/stt` and `speech-to-speech/tts` subpaths expose low-level classes used internally by the hooks; they are not documented for app integration.
 
-#### `STTLogic`
+## API Reference (hooks)
 
-Main speech recognition controller. Wraps the browser's Web Speech API with:
+### Speech-to-text controls (`useSpeechToText`)
 
-- **Silent session rotation.** Chromium ends Web Speech sessions on its own (typically after ~60s). `STTLogic` detects the browser's `end` event, commits the current session into an in-memory transcript, and transparently starts a fresh session — all without notifying the consumer. `onTranscript` is never fired during a rotation.
-- **Dedup-safe transcript model.** A high-water-mark (`processedFinalCount`) ensures each `isFinal` result is ingested exactly once across rotations, eliminating the duplicate-word artifacts typical of naive `results` concatenation.
-- **Two delivery modes.** Pick when the final transcript is emitted via the `continueOnSilence` option:
+Returned by `useSpeechToText(handlers)` after `initializeSpeechToText(config)`:
 
-| `continueOnSilence` | Behaviour                                                                                                                                                      |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `true` *(default)*  | **Continuous / manual-stop.** Listening keeps running across all silent restarts until the consumer calls `stt.stop()`. `onTranscript` fires exactly once, on stop. |
-| `false`             | **Silence-triggered.** When the user has been silent for `silenceThresholdMs`, `onTranscript` fires with the final transcript and recognition auto-stops.      |
+| Method                   | Description                                                                                              |
+| ------------------------ | -------------------------------------------------------------------------------------------------------- |
+| `startTranscript()`      | Start Web Speech listening.                                                                              |
+| `stopTranscript()`       | Stop listening; returns full transcript string; fires `onFinalTranscript` per `continueOnSilence` rules. |
+| `getTranscript()`        | Live transcript without stopping.                                                                        |
+| `clearTranscription()`   | Clear accumulated text.                                                                                  |
+| `destroyTranscription()` | Tear down recognition.                                                                                   |
+| `isListening()`          | Whether recognition is active.                                                                           |
 
-In **both** modes, `onInterimTranscript` streams the live transcript (committed sessions + current-session finals + in-flight partial) continuously, including during silent rotations — so the UI never goes blank.
+**Handlers:** `onLog`, `onInterimTranscript`, `onFinalTranscript`, `onSpeakingChange` (Web Speech heuristic), `onWordsUpdate`.
+
+**Example — manual stop (`continueOnSilence: true`):**
 
 ```typescript
-const stt = new STTLogic(
-  // Log callback
-  (message: string, level?: "info" | "warning" | "error") => void,
-  // Final transcript callback — fires ONCE (see modes above)
-  (transcript: string) => void,
-  // Options
-  {
-    // --- Delivery mode (new) ---
-    continueOnSilence?: boolean,       // default: true  (manual stop). false => silence-triggered.
-    silenceThresholdMs?: number,       // default: 1500. Only used when continueOnSilence=false.
+initializeSpeechToText({ continueOnSilence: true });
 
-    // --- Live UI streaming ---
-    onInterimTranscript?: (text: string) => void, // fires on every result, both interim & final
-
-    // --- Misc ---
-    preserveTranscriptOnStart?: boolean, // keep the previous transcript when start() is called again
-
-    // --- Deprecated (accepted for backward compat, ignored) ---
-    sessionDurationMs?: number,        // silent rotation is now browser-driven, not timer-driven
-    interimSaveIntervalMs?: number,
-  }
-);
-
-// Core methods
-stt.start();                           // Start listening
-stt.stop();                            // Stop listening AND emit onTranscript
-stt.destroy();                         // Cleanup resources
-stt.getFullTranscript();               // Live transcript: committed + current session + in-flight interim
-stt.clearTranscript();                 // Clear all accumulated transcript
-
-// Callbacks
-stt.setWordsUpdateCallback((words: string[]) => {}); // Word stream of the live transcript
-stt.setMicTimeUpdateCallback((ms: number) => {});    // Mic active time
-stt.setVadCallbacks(
-  () => console.log("Speech started"),  // onSpeechStart (heuristic)
-  () => console.log("Speech ended")     // onSpeechEnd   (heuristic)
-);
-```
-
-##### Mode 1 — Continuous (manual stop)
-
-Use this for long-form dictation, note-taking, or chat inputs where the user decides when they are done.
-
-```typescript
-const stt = new STTLogic(
-  (msg, level) => console.log(`[${level}]`, msg),
-  (finalText) => {
-    // Fires ONCE, when stt.stop() is called by you.
-    saveToDB(finalText);
-  },
-  {
-    continueOnSilence: true, // (default)
-    onInterimTranscript: (liveText) => {
-      // Fires continuously — render the growing text as the user speaks.
-      liveCaption.textContent = liveText;
-    },
-  },
-);
-
-stt.start();
-// ... user keeps talking for 5 minutes; Web Speech silently rotates several times ...
-stopButton.onclick = () => stt.stop(); // only here does onTranscript fire
-```
-
-##### Mode 2 — Silence-triggered auto-stop
-
-Use this for turn-taking conversational UIs (voice assistants, STS loops), where "user stopped talking" is the signal to act.
-
-```typescript
-const stt = new STTLogic(
-  (msg, level) => console.log(`[${level}]`, msg),
-  (finalText) => {
-    // Fires automatically once the user has been silent for silenceThresholdMs.
-    sendToLLM(finalText);
-  },
-  {
-    continueOnSilence: false,
-    silenceThresholdMs: 1500, // 1.5s of silence => auto-emit & auto-stop
-    onInterimTranscript: (liveText) => {
-      liveCaption.textContent = liveText;
-    },
-  },
-);
-
-stt.start();
-// User speaks, pauses 1.5s, onTranscript fires and listening stops on its own.
-// To begin the next turn, call stt.start() again.
-```
-
-##### Observing silent session rotations
-
-When `continueOnSilence: true`, the library will silently restart the underlying recognition session whenever the browser ends it. You can observe this in the browser DevTools console — `STTLogic` prints three clearly-prefixed markers:
-
-```text
-[STT] 🔴 Session ENDED by Web Speech (sessionId=1) — will silently restart
-[STT] 🔄 Silent restart requested (newSessionId=2, restartCount=1) — committing 3 final segment(s) + interim into memory
-[STT] 🟢 Session RESTARTED silently (sessionId=2) in 180ms — committed="hello there how are you doing today"
-...
-[STT] ⏹️  Explicit STOP — emitting onTranscript once (len=284, silent restarts during session=2)
-```
-
-The `onTranscript` callback only fires on the final `⏹️ Explicit STOP` line (or when the silence threshold hits in mode 2). If you never see anything between the red/green pairs, the rotation is fully transparent — which is the intended behaviour.
-
-### TTS (Text-to-Speech)
-
-#### `TTSLogic`
-
-Piper TTS synthesizer. Voice models download automatically on first use.
-
-```typescript
-const tts = new TTSLogic({
-  voiceId: "en_US-hfc_female-medium", // Piper voice ID
-  warmUp: true,                        // Pre-warm the model (default: true)
-  enableWasmCache: true,               // Cache WASM assets (default: true)
-});
-await tts.initialize();
-
-// Synthesize text to audio
-const result = await tts.synthesize("Hello world!");
-// result.audio: Float32Array
-// result.audioBlob: Blob (WAV format)
-// result.sampleRate: number (22050)
-// result.duration: number (seconds)
-
-// Synthesize and add to queue directly
-await tts.synthesizeAndAddToQueue("Hello world!");
-
-// Cleanup
-await tts.dispose();
-```
-
-#### WASM Caching (New in 0.1.3)
-
-The library automatically caches `piper_phonemize.data` (~9MB) and `piper_phonemize.wasm` in the browser Cache API. This eliminates repeated network downloads on every synthesis call.
-
-**Zero-config (recommended):**
-```typescript
-const tts = new TTSLogic({ voiceId: "en_US-hfc_female-medium" });
-await tts.initialize();
-// WASM files cached automatically after first download
-```
-
-**Self-hosted WASM files:**
-```typescript
-const tts = new TTSLogic({
-  voiceId: "en_US-hfc_female-medium",
-  wasmPaths: {
-    piperData: "/piper-wasm/piper_phonemize.data",
-    piperWasm: "/piper-wasm/piper_phonemize.wasm",
-    onnxWasm: "/ort/ort-wasm-simd.wasm", // optional
-  },
-});
-```
-
-**Disable caching:**
-```typescript
-const tts = new TTSLogic({
-  voiceId: "en_US-hfc_female-medium",
-  enableWasmCache: false, // Uses CDN URLs directly
-});
-```
-
-**Utility functions:**
-```typescript
-import { ensureWasmCached, isWasmCached, clearWasmCache } from "speech-to-speech/tts";
-
-// Prefetch WASM assets before initialization
-await ensureWasmCached(); // Returns { piperData: blob:..., piperWasm: blob:... }
-
-// Check if cached
-const cached = await isWasmCached(); // true/false
-
-// Clear cache
-await clearWasmCache();
-```
-
-### Audio Playback
-
-#### `sharedAudioPlayer` (Recommended)
-
-Singleton audio player with auto-play queue. Best for most use cases.
-
-```typescript
-import { sharedAudioPlayer } from "speech-to-speech";
-
-// Configure once at app startup
-sharedAudioPlayer.configure({
-  autoPlay: true, // Auto-play when audio is added (default: false)
-  sampleRate: 22050, // Sample rate (default: 22050)
-  volume: 1.0, // Volume 0.0-1.0 (default: 1.0)
+const stt = useSpeechToText({
+  onInterimTranscript: (live) => (captionEl.textContent = live),
+  onFinalTranscript: (final) => saveNote(final),
 });
 
-// Add audio to queue (plays automatically if autoPlay is true)
-sharedAudioPlayer.addAudioIntoQueue(audioData, sampleRate);
-
-// Manually play queue (if autoPlay is false)
-await sharedAudioPlayer.playAudiosFromQueue();
-
-// Queue management
-sharedAudioPlayer.getQueueSize(); // Number of items in queue
-sharedAudioPlayer.isAudioPlaying(); // Check if playing
-sharedAudioPlayer.clearQueue(); // Clear pending audio
-sharedAudioPlayer.stopAndClearQueue(); // Stop current + clear queue
-await sharedAudioPlayer.waitForQueueCompletion(); // Wait for all audio
-
-// Callbacks
-sharedAudioPlayer.setStatusCallback((status: string) => {});
-sharedAudioPlayer.setPlayingChangeCallback((playing: boolean) => {});
-
-// Cleanup
-await sharedAudioPlayer.stop();
+stt.startTranscript();
+// user speaks…
+stt.stopTranscript();
 ```
 
-#### `createAudioPlayer(config)` / `AudioPlayer`
-
-Creates an independent audio player instance. Use when you need separate players.
+**Example — silence-triggered final (`continueOnSilence: false`):**
 
 ```typescript
-import { createAudioPlayer, AudioPlayer } from "speech-to-speech";
-
-const player = createAudioPlayer({ sampleRate: 22050, volume: 1.0 });
-// or
-const player = new AudioPlayer({ sampleRate: 22050 });
-
-// Direct playback (no queue)
-await player.play(audioData, sampleRate);
-
-// With queue
-player.addAudioIntoQueue(audioData, sampleRate);
-await player.playAudiosFromQueue();
-
-// Cleanup
-await player.close();
-```
-
-## Usage Examples
-
-### Complete STT Example
-
-```typescript
-import { STTLogic } from "speech-to-speech";
-
-const liveEl = document.getElementById("live")!;
-const finalEl = document.getElementById("final")!;
-
-const stt = new STTLogic(
-  (message, level) => console.log(`[STT ${level}] ${message}`),
-  (finalTranscript) => {
-    // Fires exactly once — when stt.stop() is called (manual mode)
-    // or when silence >= silenceThresholdMs is detected (silence mode).
-    finalEl.textContent = finalTranscript;
-  },
-  {
-    continueOnSilence: true, // manual-stop mode — swap to false for silence auto-stop
-    // silenceThresholdMs: 1500,   // only used when continueOnSilence=false
-    onInterimTranscript: (liveText) => {
-      // Streams continuously — even across silent session rotations.
-      liveEl.textContent = liveText;
-    },
-  }
-);
-
-// Optional: word-by-word stream of the live transcript
-stt.setWordsUpdateCallback((words) => {
-  console.log("Words so far:", words);
+initializeSpeechToText({
+  continueOnSilence: false,
+  silenceThresholdMs: 1500,
 });
 
-// Optional: rough VAD based on Web Speech interim/final transitions
-stt.setVadCallbacks(
-  () => console.log("User started speaking"),
-  () => console.log("User stopped speaking")
-);
-
-// Start listening — silent restarts happen under the hood if Web Speech
-// ends its session; you do nothing.
-stt.start();
-
-// Stop whenever the user decides. Final transcript arrives via onTranscript.
-stopButton.addEventListener("click", () => stt.stop());
-
-// Cleanup on page unload
-window.addEventListener("beforeunload", () => stt.destroy());
-```
-
-### Complete TTS with Streaming Queue
-
-Split long text into sentences for faster time-to-first-audio:
-
-```typescript
-import { TTSLogic, sharedAudioPlayer } from "speech-to-speech";
-
-// Configure auto-play queue
-sharedAudioPlayer.configure({ autoPlay: true });
-sharedAudioPlayer.setStatusCallback((s) => console.log(s));
-sharedAudioPlayer.setPlayingChangeCallback((playing) => {
-  console.log(playing ? "Audio started" : "Audio ended");
+const stt = useSpeechToText({
+  onFinalTranscript: (final) => sendToBackend(final),
 });
 
-// Initialize TTS
-const tts = new TTSLogic({ voiceId: "en_US-hfc_female-medium" });
-await tts.initialize();
-
-// Split text into sentences for streaming
-const text =
-  "Hello! This is a long response. It will be synthesized sentence by sentence.";
-const sentences = text.split(/(?<=[.!?])\s+/).filter((s) => s.trim());
-
-// Synthesize each sentence and add to queue immediately
-for (const sentence of sentences) {
-  const result = await tts.synthesize(sentence);
-  sharedAudioPlayer.addAudioIntoQueue(result.audio, result.sampleRate);
-  // First sentence starts playing while others synthesize!
-}
-
-// Wait for all audio to complete
-await sharedAudioPlayer.waitForQueueCompletion();
-console.log("All audio finished!");
+stt.startTranscript();
+// final fires automatically after 1.5s silence; call startTranscript() again for next turn
 ```
 
-### Full Speech-to-Speech Example
+### Text-to-speech controls (`useTextToSpeech`)
 
-Complete voice conversation with LLM integration:
+After `await initializeTextToSpeech({ voiceId, wasmPaths?, autoPlay?, ... })`:
+
+| Method                 | Description                                              |
+| ---------------------- | -------------------------------------------------------- |
+| `speak(text)`          | Synthesize and enqueue one string.                       |
+| `speakSentences(text)` | Split on `.!?;` and enqueue sentences for lower latency. |
+| `stopSpeaking()`       | Stop playback and clear queue.                           |
+| `isReady()`            | Whether WASM/voice finished loading.                     |
+
+Pass `{ player: useSharedAudioPlayer() }` to share the queue with STS.
+
+### Shared audio player (`useSharedAudioPlayer`)
+
+Singleton queue used by default for TTS/STS fillers and agent speech:
 
 ```typescript
-import { STTLogic, TTSLogic, sharedAudioPlayer } from "speech-to-speech";
-
-// State
-let stt: STTLogic;
-let tts: TTSLogic;
-let conversationHistory: { role: string; content: string }[] = [];
-
-// Initialize
-async function init() {
-  // Configure shared audio player
-  sharedAudioPlayer.configure({ autoPlay: true });
-
-  // Initialize TTS
-  tts = new TTSLogic({ voiceId: "en_US-hfc_female-medium" });
-  await tts.initialize();
-
-  // Initialize STT in silence-triggered mode — the library itself decides
-  // when the user is done and fires `onTranscript` automatically.
-  stt = new STTLogic(
-    (msg, level) => console.log(`[STT] ${msg}`),
-    async (finalTranscript) => {
-      // Fires once per turn, when silence >= silenceThresholdMs is detected.
-      if (finalTranscript.trim().length > 3) {
-        await processSpeech(finalTranscript);
-      }
-      stt.clearTranscript();
-      stt.start(); // start next turn
-    },
-    {
-      continueOnSilence: false,
-      silenceThresholdMs: 1500,
-      onInterimTranscript: (live) => (liveCaption.textContent = live),
-    }
-  );
-}
-
-// Send to LLM and speak response
-async function processSpeech(userMessage: string) {
-  conversationHistory.push({ role: "user", content: userMessage });
-
-  // Call your LLM API
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${YOUR_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: "You are a helpful voice assistant. Keep responses brief.",
-        },
-        ...conversationHistory,
-      ],
-    }),
-  });
-
-  const data = await response.json();
-  const aiMessage = data.choices[0].message.content;
-  conversationHistory.push({ role: "assistant", content: aiMessage });
-
-  // Speak response sentence by sentence
-  const sentences = aiMessage
-    .split(/(?<=[.!?])\s+/)
-    .filter((s: string) => s.trim());
-  for (const sentence of sentences) {
-    const result = await tts.synthesize(sentence);
-    sharedAudioPlayer.addAudioIntoQueue(result.audio, result.sampleRate);
-  }
-
-  await sharedAudioPlayer.waitForQueueCompletion();
-}
-
-// Start conversation
-function start() {
-  stt.start();
-}
-
-// Stop conversation
-function stop() {
-  stt.stop();
-  sharedAudioPlayer.stopAndClearQueue();
-}
+const player = useSharedAudioPlayer();
+player.configure({ autoPlay: true, volume: 1 });
+player.enqueue(audio, sampleRate);
+player.stopAndClear();
+await player.waitUntilIdle();
+player.setPlayingChangeCallback((playing) => {});
 ```
 
-## Unified Speech Service
+`createSharedAudioPlayer()` creates a separate queue if needed.
 
-`createSpeechService()` wires STT and TTS together so you need fewer imports and no manual callback plumbing.
+### Speech-to-speech flow
+
+```mermaid
+sequenceDiagram
+  participant VAD
+  participant WS as Web Speech
+  participant SDK as useSpeechToSpeech
+  participant App as Your LLM + TTS
+
+  VAD->>SDK: voice start
+  SDK->>WS: start()
+  WS-->>SDK: onInterimTranscript
+  Note over SDK: optional filler LLM + TTS queue (paused while speaking)
+  VAD->>SDK: voice end
+  SDK->>WS: stop()
+  WS-->>SDK: onFinalTranscript
+  SDK-->>App: onFinalTranscript(text)
+  App->>App: LLM
+  App->>App: useTextToSpeech().speakSentences(reply)
+```
+
+---
+
+## Unified Speech Service (deprecated)
+
+`createSpeechService()` is deprecated in favor of `initializeSpeechToSpeech` / `useSpeechToSpeech` (VAD, agent states, and shared runtime). It remains available for older integrations.
 
 ```ts
 import { createSpeechService } from "speech-to-speech";
@@ -762,42 +619,43 @@ service.stopSpeaking();
 
 Get real-time partial results while the user is still speaking. `onInterimTranscript` fires on **every** recognition update (both interim and final results) with the full live transcript — including the text committed from prior silent session rotations — so you can render a continuously-growing caption without any gaps when the browser rotates the underlying Web Speech session.
 
-Pass `onInterimTranscript` directly to `initializeSTT()`:
+Pass `onInterimTranscript` to `useSpeechToText` or `useSpeechToSpeech`:
 
 ```ts
-import { createSpeechService } from "speech-to-speech";
+import { initializeSpeechToText, useSpeechToText } from "speech-to-speech";
 
-const service = createSpeechService();
+initializeSpeechToText({ continueOnSilence: true });
 
-service.initializeSTT({
-  onTranscript: (finalText) => console.log("Final:", finalText),
+const stt = useSpeechToText({
+  onFinalTranscript: (finalText) => console.log("Final:", finalText),
   onInterimTranscript: (liveText) => {
-    // Full live text: committed sessions + current-session finals + in-flight partial.
-    // Never empties mid-session due to Web Speech's internal timeouts.
     liveCaption.textContent = liveText;
   },
 });
 
-await service.initializeTTS({ voiceId: "en_US-hfc_female-medium" });
-service.startListening();
+stt.startTranscript();
 ```
 
 ---
 
 ## TTS Warmup
 
-Call `prefetchTTSModel()` early in your app boot (e.g. after page load) so the first `speak()` call has no cold-start delay:
+Prefetch WASM (and optionally the voice model) before the user triggers speech:
 
 ```ts
-import { prefetchTTSModel } from "speech-to-speech";
+import {
+  prefetchTextToSpeechAssets,
+  initializeTextToSpeech,
+  useTextToSpeech,
+} from "speech-to-speech";
 
-// Fire-and-forget — safe to call before the user interacts
-prefetchTTSModel("en_US-hfc_female-medium");
-
-// Later, when the user actually triggers speech:
-const tts = new TTSLogic({ voiceId: "en_US-hfc_female-medium" });
-await tts.initialize(); // instant — model already cached
+await prefetchTextToSpeechAssets({ voiceId: "en_US-hfc_female-medium" });
+await initializeTextToSpeech({ voiceId: "en_US-hfc_female-medium" });
+const tts = useTextToSpeech();
+await tts.speak("Hello"); // faster first playback
 ```
+
+Low-level API: `prefetchTTSModel(voiceId)` from `speech-to-speech/tts`.
 
 ---
 
@@ -811,7 +669,9 @@ import { getCompatibilityInfo } from "speech-to-speech";
 const { stt, tts, browser } = getCompatibilityInfo();
 
 if (!stt) {
-  showBanner(`Speech input is not supported in ${browser}. Please use Chrome or Edge.`);
+  showBanner(
+    `Speech input is not supported in ${browser}. Please use Chrome or Edge.`,
+  );
 }
 if (!tts) {
   showBanner("Text-to-speech is not supported in this browser.");
@@ -825,7 +685,7 @@ if (!tts) {
 Strip HTML, Markdown, and emoji from LLM responses before passing them to synthesis:
 
 ```ts
-import { cleanTextForTTS } from "speech-to-speech";
+import { cleanTextForTTS } from "speech-to-speech/tts";
 
 const raw = "**Hello** <b>world</b>! Here's a [link](https://example.com) 🎉";
 const spoken = cleanTextForTTS(raw);
@@ -843,14 +703,14 @@ const spoken2 = cleanTextForTTS(raw, { removeEmojis: false });
 React to playback state changes without polling:
 
 ```ts
-import { sharedAudioPlayer } from "speech-to-speech";
+import { useSharedAudioPlayer } from "speech-to-speech";
 
-sharedAudioPlayer.setStatusCallback((status) => {
-  console.log("[TTS]", status); // e.g. "Playing audio chunk 1"
+const player = useSharedAudioPlayer();
+player.setStatusCallback((status) => {
+  console.log("[TTS]", status);
 });
-
-sharedAudioPlayer.setPlayingChangeCallback((isPlaying) => {
-  setTTSIndicator(isPlaying); // show/hide a speaking indicator in UI
+player.setPlayingChangeCallback((isPlaying) => {
+  setTTSIndicator(isPlaying);
 });
 ```
 
@@ -878,7 +738,10 @@ See [Piper Voices](https://rhasspy.github.io/piper-samples/) for the complete li
 | ------------------------ | ------ | ------- | ------ | ---- |
 | STT (Speech Recognition) | ✅     | ❌      | ✅     | ✅   |
 | TTS (Piper ONNX)         | ✅     | ✅      | ✅     | ✅   |
+| Neural VAD (STS)         | ✅     | ✅\*    | ✅\*   | ✅   |
 | Web Audio API            | ✅     | ✅      | ✅     | ✅   |
+
+\* Firefox supports VAD/TTS but not Web Speech STT — use Chrome/Edge/Safari for full speech-to-speech.
 
 **Note:** Speech Recognition API requires Chrome, Safari, or Edge. Firefox does not support the Web Speech API.
 
@@ -886,31 +749,42 @@ See [Piper Voices](https://rhasspy.github.io/piper-samples/) for the complete li
 
 ### TTS Issues
 
-| Issue                | Solution                                                                                |
-| -------------------- | --------------------------------------------------------------------------------------- |
-| "Voice not found"    | Check voice ID spelling. Use `en_US-hfc_female-medium` for testing.                     |
-| Slow first synthesis | Normal - voice model (~20MB) and WASM files (~9MB) download on first use. Subsequent calls use cached assets. |
-| Repeated WASM downloads | Ensure `enableWasmCache: true` (default). Check browser Cache API support. |
-| No audio output      | Ensure browser supports Web Audio API. Check volume and audio permissions.              |
-| CORS errors          | Ensure Vite config has proper COOP/COEP headers (see above).                            |
+| Issue                   | Solution                                                                                                      |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------- |
+| "Voice not found"       | Check voice ID spelling. Use `en_US-hfc_female-medium` for testing.                                           |
+| Slow first synthesis    | Normal - voice model (~20MB) and WASM files (~9MB) download on first use. Subsequent calls use cached assets. |
+| Repeated WASM downloads | Ensure `enableWasmCache: true` (default). Check browser Cache API support.                                    |
+| No audio output         | Ensure browser supports Web Audio API. Check volume and audio permissions.                                    |
+| CORS errors             | Ensure Vite config has proper COOP/COEP headers (see above).                                                  |
 
 ### STT Issues
 
-| Issue                              | Solution                                                                                   |
-| ---------------------------------- | ------------------------------------------------------------------------------------------ |
-| "Speech Recognition not supported" | Use Chrome, Safari, or Edge. Firefox doesn't support Web Speech API.                       |
-| No transcript                      | Check microphone permissions. Ensure `stt.start()` was called.                             |
-| Transcript stops                   | The library silently restarts the recognition session whenever the browser ends it — nothing to configure. Open DevTools and look for the `[STT] 🔴 … 🟢` log pair to confirm a rotation happened. |
-| `onTranscript` never fires         | In `continueOnSilence: true` (default) it only fires on `stt.stop()`. Call `stop()` to get the final transcript, or switch to `continueOnSilence: false` + `silenceThresholdMs` for automatic delivery. |
-| Duplicated words in final          | Fixed in v0.1.5. If you still see duplicates, ensure you are on ≥ 0.1.5 — the old `sessionDurationMs` / `interimSaveIntervalMs` timer path no longer runs.                                          |
+| Issue                              | Solution                                                                                                                                                   |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "Speech Recognition not supported" | Use Chrome, Safari, or Edge. Firefox doesn't support Web Speech API.                                                                                       |
+| No transcript                      | Check microphone permissions. Call `startTranscript()` (STT) or `startConversation()` (STS).                                                               |
+| Transcript stops (STT hook)        | With `continueOnSilence: true`, Web Speech may rotate silently — use `onInterimTranscript` for live UI; final needs `stopTranscript()`.                    |
+| `onFinalTranscript` never fires    | STT: with `continueOnSilence: true` (default), call `stopTranscript()`. With `false`, wait for `silenceThresholdMs`. STS: wait for VAD end of utterance.   |
+| Duplicated words in final          | Fixed in v0.1.5. If you still see duplicates, ensure you are on ≥ 0.1.5 — the old `sessionDurationMs` / `interimSaveIntervalMs` timer path no longer runs. |
+
+### VAD / speech-to-speech
+
+| Issue                           | Solution                                                                                          |
+| ------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Stuck on “Loading VAD…”         | Ensure `speechAssetsPlugin` is registered and `/ort/` + `/vad/` return 200 in Network tab.        |
+| 404 on `/ort/*` or `/vad/*`     | Run `npm install onnxruntime-web` in the app; reinstall so the plugin can resolve `node_modules`. |
+| Mic never starts                | Call `await startConversation()` (not only `initializeSpeechToSpeech`). Grant mic permission.     |
+| STT runs without user speech    | STS always uses VAD — use `useSpeechToText` for always-on Web Speech without neural VAD.          |
+| SharedArrayBuffer / COEP errors | Set COOP/COEP headers on dev and preview servers (see Vite config).                               |
 
 ### Dev Server Issues (Vite)
 
-| Issue                                           | Solution                                                    |
-| ----------------------------------------------- | ----------------------------------------------------------- |
-| "Module externalized for browser compatibility" | Add `optimizeDeps.include` in Vite config (see above).      |
-| WASM loading errors                             | Ensure COOP/COEP headers are set. Try advanced Vite config. |
-| Works in production but not dev                 | Clear `.vite` cache: `rm -rf node_modules/.vite`            |
+| Issue                                           | Solution                                                                                                                |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| "Module externalized for browser compatibility" | Add `optimizeDeps.include` in Vite config (see above).                                                                  |
+| WASM loading errors                             | Ensure COOP/COEP headers are set and `speechAssetsPlugin` is enabled.                                                   |
+| Type error on `speechAssetsPlugin` in monorepo  | Cast `as PluginOption` if two copies of `vite` exist (`file:..` link). Published npm installs usually do not need this. |
+| Works in production but not dev                 | Clear `.vite` cache: `rm -rf node_modules/.vite`                                                                        |
 
 ### Next.js Issues
 
@@ -935,11 +809,20 @@ npm run clean   # Remove dist/
 - **[Piper TTS](https://github.com/rhasspy/piper)** - Neural text-to-speech by Rhasspy
 - **[@realtimex/piper-tts-web](https://github.com/synesthesiam/piper)** - Browser wrapper for Piper
 - **[Web Speech API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Speech_API)** - Browser speech recognition
+- **[@ricky0123/vad-web](https://github.com/ricky0123/vad-web)** - Silero VAD for mic gating in speech-to-speech
 - **[Web Audio API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API)** - Audio processing
 
 ## Changelog
 
-### v0.1.5
+### v0.1.7 (unreleased)
+
+- **Consumer hooks** on the main export: `initializeSpeechToText`, `useSpeechToText`, `initializeTextToSpeech`, `useTextToSpeech`, `initializeSpeechToSpeech`, `useSpeechToSpeech`, `useSharedAudioPlayer`, `prefetchTextToSpeechAssets`.
+- **STS always uses neural VAD**; final transcripts on VAD speech end; Web Speech `continueOnSilence` forced internally.
+- **Filler words** via `heuristics` + `onFillerGenerated`; consumer LLM/TTS on `onFinalTranscript`.
+- **`speech-to-speech/vite`** — `speechAssetsPlugin` for `/ort/` and `/vad/`.
+- **Hook-only consumer docs**; class APIs moved to internal subpaths.
+
+### v0.1.6
 
 - **`STTLogic` — silent session rotation.** Web Speech's internal session end (the ~60s browser timeout, error retries, any spontaneous `end` event) now triggers a fully-silent restart: the library commits the current session into an in-memory transcript and starts a fresh recognition session. `onTranscript` is **not** emitted during rotations, so the consumer sees one uninterrupted listening session.
 - **`STTLogic` — dedup-safe transcript model.** The previous `results` concatenation + `collapseRepeats` safety net is replaced by a high-water-mark (`processedFinalCount`) that ingests each `isFinal` result exactly once. This eliminates the duplicate-word/line artifacts that could previously appear in the final transcript.
@@ -951,7 +834,7 @@ npm run clean   # Remove dist/
 - **Deprecated options (accepted for backward compatibility, now no-ops):** `sessionDurationMs`, `interimSaveIntervalMs`. Session rotation is browser-driven, not timer-driven.
 - **Observability.** `STTLogic` emits colored `[STT]` console markers on session end, silent restart, and explicit stop, so you can verify behaviour from DevTools without any extra wiring.
 
-### v0.1.4
+### v0.1.5
 
 - **`createSpeechService()`** — Unified service wrapper that wires STT + TTS together with a single ergonomic API. Supports `initializeSTT`, `initializeTTS`, `startListening`, `stopListening`, `speak`, `stopSpeaking`, and `getCompatibilityInfo`.
 - **`onInterimTranscript`** — New option in `STTLogic` (and `createSpeechService().initializeSTT()`) to receive real-time partial transcript updates while the user is still speaking.
@@ -959,7 +842,7 @@ npm run clean   # Remove dist/
 - **`getCompatibilityInfo()`** — Returns `{ stt, tts, browser }` for browser feature detection and UI gating.
 - **`cleanTextForTTS(text, options?)`** — Strips HTML, Markdown, and emoji from text before synthesis. Options: `stripHtml`, `stripMarkdown`, `removeEmojis` (all default `true`).
 
-### v0.1.3
+### v0.1.4
 
 - Automatic WASM caching via the browser Cache API — `piper_phonemize.data` (~9MB) and `piper_phonemize.wasm` are fetched once and reused across sessions.
 - `ensureWasmCached`, `isWasmCached`, `clearWasmCache` utility functions.

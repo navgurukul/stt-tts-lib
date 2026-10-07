@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -9,8 +9,8 @@
         box-sizing: border-box;
       }
       body {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-          sans-serif;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
         margin: 0;
         padding: 2rem;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -161,6 +161,47 @@
       .tab-content.active {
         display: block;
       }
+      .config-panel {
+        margin: 1rem 0;
+        padding: 12px;
+        background: #f9f9f9;
+        border-radius: 8px;
+        border: 1px solid #eee;
+      }
+      .config-panel h3 {
+        margin: 0 0 0.75rem;
+        font-size: 15px;
+        color: #444;
+      }
+      .toggle-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0.35rem 0;
+        font-size: 14px;
+      }
+      .toggle-row input[type="checkbox"] {
+        width: auto;
+        margin: 0;
+      }
+      .config-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-top: 0.5rem;
+      }
+      .config-grid label {
+        font-size: 13px;
+        color: #555;
+      }
+      .config-grid input {
+        margin: 0.25rem 0 0;
+      }
+      @media (max-width: 640px) {
+        .config-grid {
+          grid-template-columns: 1fr;
+        }
+      }
     </style>
   </head>
   <body>
@@ -207,21 +248,24 @@
             <input
               type="text"
               id="stsApiUrl"
+              class="sts-config-field"
               placeholder="API URL (e.g., https://api.openai.com/v1/chat/completions)"
-              value="https://api.openai.com/v1/chat/completions"
+              value="http://localhost:8787/v1/chat/completions"
             />
             <input
               type="password"
               id="stsApiKey"
+              class="sts-config-field"
               placeholder="API Key"
-              value="<%= process.env.OPENAI_SECRET_KEY || '' %>"
+              value="<%= process.env.OPENAI_SECRET_KEY || 'proxy' %>"
             />
           </div>
           <input
             type="text"
             id="stsModel"
+            class="sts-config-field"
             placeholder="Model (e.g., gpt-4o-mini)"
-            value="gpt-4o-mini"
+            value="openai/gpt-oss-20b"
             style="margin-bottom: 1rem"
           />
 
@@ -229,9 +273,87 @@
           <input
             type="text"
             id="stsVoiceId"
+            class="sts-config-field"
             value="en_US-hfc_female-medium"
             placeholder="TTS Voice ID"
           />
+
+          <div class="config-panel">
+            <h3>⚙️ Listening & filler settings</h3>
+            <p style="font-size: 13px; color: #666; margin: 0 0 0.75rem">
+              Applied when you click Initialize STS (change values before init).
+            </p>
+
+            <label class="toggle-row">
+              <input
+                type="checkbox"
+                id="stsShortFiller"
+                class="sts-config-field"
+                checked
+                onchange="syncStsOptionFields()"
+              />
+              Short filler words (LLM acknowledgment while user speaks)
+            </label>
+
+            <label class="toggle-row">
+              <input
+                type="checkbox"
+                id="stsLongFiller"
+                class="sts-config-field"
+                checked
+                onchange="syncStsOptionFields()"
+              />
+              Long filler words (LLM rephrase while user speaks)
+            </label>
+
+            <div class="config-grid">
+              <div>
+                <label for="stsShortFillerDelayMs"
+                  >Short filler delay (ms)</label
+                >
+                <input
+                  type="number"
+                  id="stsShortFillerDelayMs"
+                  class="sts-config-field sts-filler-field"
+                  min="0"
+                  step="500"
+                  value="5000"
+                />
+              </div>
+              <div>
+                <label for="stsLongFillerDelayMs">Long filler delay (ms)</label>
+                <input
+                  type="number"
+                  id="stsLongFillerDelayMs"
+                  class="sts-config-field sts-filler-field"
+                  min="0"
+                  step="500"
+                  value="10000"
+                />
+              </div>
+              <div>
+                <label for="stsFillerTimeoutMs">Filler LLM timeout (ms)</label>
+                <input
+                  type="number"
+                  id="stsFillerTimeoutMs"
+                  class="sts-config-field sts-filler-field"
+                  min="500"
+                  step="100"
+                  value="15000"
+                />
+              </div>
+              <div>
+                <label for="stsLanguageHint">Filler language hint</label>
+                <input
+                  type="text"
+                  id="stsLanguageHint"
+                  class="sts-config-field sts-filler-field"
+                  value="English"
+                  placeholder="e.g. English, Hindi"
+                />
+              </div>
+            </div>
+          </div>
 
           <div class="button-group">
             <button class="btn-secondary" onclick="initSTS()" id="initStsBtn">
@@ -309,10 +431,10 @@
             "
           >
             <strong>💡 How it works:</strong><br />
-            1. Click "Start Conversation" and speak<br />
-            2. When you pause, your speech is sent to the LLM<br />
-            3. LLM response is automatically spoken back to you<br />
-            4. Continue the conversation naturally!
+            1. Configure VAD / fillers, then Initialize STS<br />
+            2. Start conversation and speak (VAD opens Web Speech per utterance)<br />
+            3. Optional: fillers fire after the configured delays while you talk<br />
+            4. On pause, final transcript goes to your LLM; reply is spoken via TTS
           </div>
         </div>
 
@@ -469,40 +591,18 @@ Hello and welcome to this advanced audio streaming demonstration where the goal 
 npm install ./speech-to-speech-0.1.3.tgz</pre
           >
 
-          <h3>Available Exports</h3>
-          <h4>STT (Speech-to-Text)</h4>
+          <h3>Consumer hooks (main export)</h3>
           <ul>
-            <li><code>ResetSTTLogic</code> - Auto-restart STT logic</li>
-            <li><code>STTLogic</code> - Basic STT logic</li>
-            <li><code>VADController</code> - Voice Activity Detection</li>
+            <li><code>initializeSpeechToText</code> / <code>useSpeechToText</code></li>
+            <li><code>initializeTextToSpeech</code> / <code>useTextToSpeech</code></li>
+            <li><code>initializeSpeechToSpeech</code> / <code>useSpeechToSpeech</code></li>
+            <li><code>useSharedAudioPlayer</code> / <code>prefetchTextToSpeechAssets</code></li>
           </ul>
-
-          <h4>TTS (Text-to-Speech)</h4>
-          <ul>
-            <li><code>PiperSynthesizer</code> - ONNX-based speech synthesis</li>
-            <li><code>AudioPlayer</code> - Audio playback controller</li>
-            <li><code>preparePiperVoice</code> - Voice preparation utility</li>
-            <li><code>streamTokensToSpeech</code> - Streaming TTS</li>
-            <li><code>useStreamingTTS</code> - React hook for TTS</li>
-            <li><code>ensureWasmCached</code> - Cache piper WASM assets</li>
-          </ul>
-
-          <h3>Usage Examples</h3>
-          <pre
-            style="
-              background: #f5f5f5;
-              padding: 12px;
-              border-radius: 8px;
-              overflow-x: auto;
-            "
-          >
-// Import from main entry
-import { ResetSTTLogic, TTSLogic } from 'stt-tts-lib';
-
-// Or import from submodules
-import { ResetSTTLogic } from 'stt-tts-lib/stt';
-import { TTSLogic, ensureWasmCached } from 'stt-tts-lib/tts';</pre
-          >
+          <p style="font-size: 13px; color: #666">
+            See README.md for full API. Low-level classes live under
+            <code>speech-to-speech/stt</code> and <code>speech-to-speech/tts</code>
+            (internal; use hooks in apps).
+          </p>
         </div>
       </div>
 
@@ -519,7 +619,21 @@ import { TTSLogic, ensureWasmCached } from 'stt-tts-lib/tts';</pre
     <script type="module" src="/main.js"></script>
 
     <script>
+      function syncStsOptionFields() {
+        const shortOn = document.getElementById("stsShortFiller")?.checked;
+        const longOn = document.getElementById("stsLongFiller")?.checked;
+        const fillersOn = shortOn || longOn;
+        document.querySelectorAll(".sts-filler-field").forEach((el) => {
+          el.disabled = !fillersOn;
+        });
+      }
+      document.addEventListener("DOMContentLoaded", syncStsOptionFields);
+
       function switchTab(tabName) {
+        if (window.teardownDemoTab) {
+          window.teardownDemoTab(tabName);
+        }
+
         // Hide all tabs
         document.querySelectorAll(".tab-content").forEach((tab) => {
           tab.classList.remove("active");

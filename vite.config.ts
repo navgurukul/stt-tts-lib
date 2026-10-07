@@ -1,11 +1,11 @@
 import { defineConfig } from 'vite';
-import { onnxWasmPlugin } from './vite-onnx-plugin';
+import { speechAssetsPlugin } from './src/vite/index.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
 export default defineConfig({
   plugins: [
-    onnxWasmPlugin(),
+    speechAssetsPlugin({ copyForProduction: true }),
   ],
   server: {
     port: 5173,

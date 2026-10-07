@@ -16,9 +16,12 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-export * from "./stt/index.js";
-export * from "./tts/index.js";
+/** Consumer-facing composable APIs (recommended). */
+export * from "./consumer/index.js";
 
+/**
+ * @deprecated Use `initializeSpeechToSpeech` / `useSpeechToSpeech` instead.
+ */
 export { createSpeechService } from "./internal/speech-service.js";
 export type {
   SpeechService,

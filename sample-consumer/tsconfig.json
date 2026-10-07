@@ -14,5 +14,5 @@
     "allowSyntheticDefaultImports": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["main.js", "*.ts"]
+  "include": ["*.ts"]
 }

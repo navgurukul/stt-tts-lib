@@ -1,7 +1,10 @@
-/** @deprecated Import from `speech-to-speech/vite` */
+/**
+ * Vite helpers for apps using speech-to-speech (ORT + VAD static assets).
+ */
+
 export {
   speechAssetsPlugin,
   onnxWasmPlugin,
   type SpeechAssetsPluginOptions,
   type SpeechAssetsPluginOptions as OnnxWasmPluginOptions,
-} from "./src/vite/index.js";
+} from "./speech-assets-plugin.js";

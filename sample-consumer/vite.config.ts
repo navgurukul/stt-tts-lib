@@ -1,39 +1,48 @@
-import { defineConfig } from "vite";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { defineConfig, type PluginOption } from "vite";
+import { speechAssetsPlugin } from "speech-to-speech/vite";
+
+const sampleRoot = path.dirname(fileURLToPath(import.meta.url));
 
 /**
- * Vite configuration for stt-tts-lib consumer
- *
- * The key to making Piper TTS work in dev server is:
- * 1. Force pre-bundling of piper-tts-web and onnxruntime-web (include, not exclude)
- * 2. Set proper CORS headers for SharedArrayBuffer
- * 3. Use CDN for WASM files (configured in ort-setup.js)
+ * Piper TTS + neural VAD (STS) need /ort/ and /vad/ at dev, preview, and build time.
  */
-
 export default defineConfig({
+  root: sampleRoot,
+
+  // Monorepo `file:..` link: library types reference root `vite`, this app uses its own copy.
+  plugins: [
+    speechAssetsPlugin({ copyForProduction: true }) as PluginOption,
+  ],
+
   server: {
     port: 3000,
     open: true,
     headers: {
-      // Required for SharedArrayBuffer (multi-threaded WASM)
       "Cross-Origin-Opener-Policy": "same-origin",
       "Cross-Origin-Embedder-Policy": "require-corp",
     },
     fs: {
-      allow: [".."],
+      allow: [sampleRoot, path.join(sampleRoot, "..")],
+    },
+  },
+
+  preview: {
+    port: 3000,
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
     },
   },
 
   optimizeDeps: {
-    // INCLUDE (not exclude) - force Vite to pre-bundle these libraries
-    // This bundles the worker code upfront, avoiding runtime blob Worker issues
     include: ["onnxruntime-web", "@realtimex/piper-tts-web"],
-    // Required for top-level await in WASM modules
     esbuildOptions: {
       target: "esnext",
     },
   },
 
-  // Worker configuration
   worker: {
     format: "es",
   },
@@ -44,6 +53,5 @@ export default defineConfig({
     target: "esnext",
   },
 
-  // Handle WASM files
   assetsInclude: ["**/*.wasm", "**/*.onnx"],
 });

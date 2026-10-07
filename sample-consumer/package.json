@@ -9,11 +9,13 @@
     "build": "vite build",
     "preview": "vite preview",
     "copy-ort": "echo 'copy-ort skipped'",
-    "speech-to-speech": "npm install ../speech-to-speech-0.1.5.tgz"
+    "speech-to-speech": "npm run build --prefix .. && npm install"
   },
   "dependencies": {
+    "@ricky0123/vad-web": "^0.0.30",
     "@vitejs/plugin-react": "^5.1.2",
-    "onnxruntime-web": "^1.23.2"
+    "onnxruntime-web": "^1.23.2",
+    "speech-to-speech": "file:.."
   },
   "devDependencies": {
     "typescript": "^5.4.0",

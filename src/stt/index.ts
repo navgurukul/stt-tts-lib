@@ -23,8 +23,11 @@ export type {
   ResetStats,
 } from "./reset-stt-logic.js";
 
-export { VADController } from "./vad-controller.js";
-export type { VADControllerOptions } from "./vad-controller.js";
+export { VADController, VoiceActivityDetector } from "./vad-controller.js";
+export type {
+  VADControllerOptions,
+  VadAssetPaths,
+} from "./vad-controller.js";
 
 export { STTLogic } from "./stt-logic.js";
 export type {

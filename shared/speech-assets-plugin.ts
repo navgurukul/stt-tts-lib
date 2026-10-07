@@ -4,4 +4,4 @@ export {
   onnxWasmPlugin,
   type SpeechAssetsPluginOptions,
   type SpeechAssetsPluginOptions as OnnxWasmPluginOptions,
-} from "./src/vite/index.js";
+} from "../src/vite/speech-assets-plugin.js";
